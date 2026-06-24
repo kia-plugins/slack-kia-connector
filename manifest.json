@@ -1,0 +1,56 @@
+{
+  "id": "kia.slack",
+  "displayName": "Slack",
+  "version": "1.0.0",
+  "hostApi": "^2.0.0",
+  "entry": "dist/index.js",
+  "icon": "slack",
+  "permissions": ["db:read", "db:write", "net", "secrets"],
+  "activationEvents": ["onStartup"],
+  "contributes": {
+    "sources": [
+      {
+        "id": "slack",
+        "displayName": "Slack",
+        "icon": "slack",
+        "capabilities": {
+          "multiAccount": true,
+          "requiresAuth": true,
+          "supportsBackfill": true,
+          "supportsDelta": true,
+          "supportsRealtime": false
+        },
+        "inAddSource": true,
+        "pollable": true,
+        "submit": "slack-submit",
+        "steps": [
+          {
+            "type": "show-copyable",
+            "title": "Create the Slack app",
+            "body": "api.slack.com/apps → Create New App → From a manifest → paste this:",
+            "link": "https://api.slack.com/apps",
+            "content": "display_information:\n  name: KIAgent\n  description: Personal digital memory indexing (runs locally on your Mac)\noauth_config:\n  scopes:\n    user:\n      - channels:history\n      - channels:read\n      - groups:history\n      - groups:read\n      - im:history\n      - im:read\n      - mpim:history\n      - mpim:read\n      - users:read\n      - files:read\nsettings:\n  org_deploy_enabled: false\n  socket_mode_enabled: false\n  token_rotation_enabled: false\n",
+            "copyButton": true
+          },
+          {
+            "type": "instruction",
+            "title": "Install to your workspace",
+            "body": "On the app page: Install App → Install to Workspace."
+          },
+          {
+            "type": "input-fields",
+            "validate": "slack-token",
+            "fields": [
+              {
+                "key": "token",
+                "label": "User OAuth Token",
+                "input": "password",
+                "placeholder": "xoxp-…"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
