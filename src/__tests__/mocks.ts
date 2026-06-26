@@ -4,7 +4,7 @@ import type {
   DocumentId,
   PendingDocument,
   SyncStateRow,
-} from '@alpha-cent/connector-sdk';
+} from '@kiagent/connector-sdk';
 import type { Converter } from '../host';
 
 /** Reversible stand-in for Electron safeStorage (tests have no keyring). */

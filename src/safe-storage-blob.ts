@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import type { SafeStorageLike } from '@alpha-cent/connector-sdk';
+import type { SafeStorageLike } from '@kiagent/connector-sdk';
 
 // Vendored from the app's oauth-shared/safe-storage-blob, with the Electron
 // `require('electron').safeStorage` default removed: a forked extension process

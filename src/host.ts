@@ -1,4 +1,4 @@
-import type { ConnectorHost } from '@alpha-cent/connector-sdk';
+import type { ConnectorHost } from '@kiagent/connector-sdk';
 
 /** Minimal async DB surface the connector calls on ctx.db (cast from unknown).
  *  Mirrors the app's AppDb shape the host injects into the forked process. */

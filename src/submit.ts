@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import type { ConnectorSetupHost } from '@alpha-cent/connector-sdk';
+import type { ConnectorSetupHost } from '@kiagent/connector-sdk';
 import type { Db } from './host';
 import {
   deleteAccount,

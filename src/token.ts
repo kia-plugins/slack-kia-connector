@@ -1,4 +1,4 @@
-import type { SafeStorageLike } from '@alpha-cent/connector-sdk';
+import type { SafeStorageLike } from '@kiagent/connector-sdk';
 import {
   decodeJsonFromStorage,
   encodeJsonForStorage,

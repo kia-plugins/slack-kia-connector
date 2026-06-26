@@ -1,6 +1,6 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { ByteSource } from '@alpha-cent/connector-sdk';
+import type { ByteSource } from '@kiagent/connector-sdk';
 import type { Db } from './host';
 import { mediaDir } from './media-dir';
 

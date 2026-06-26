@@ -1,5 +1,5 @@
-// Vendored from @alpha-cent/connector-sdk v1.1 (types only; never executed).
-declare module '@alpha-cent/connector-sdk' {
+// Vendored from @kiagent/connector-sdk v1.1 (types only; never executed).
+declare module '@kiagent/connector-sdk' {
   export type DocumentId = bigint;
 
   export interface PendingDocument {

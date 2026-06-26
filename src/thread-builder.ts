@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { DocumentId } from '@alpha-cent/connector-sdk';
+import type { DocumentId } from '@kiagent/connector-sdk';
 import type { Converter, Host } from './host';
 import { renderMrkdwn } from './render';
 import type { ConversationKind, SlackMessage } from './types';

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { ConnectorSetupHost } from '@alpha-cent/connector-sdk';
+import type { ConnectorSetupHost } from '@kiagent/connector-sdk';
 import { submitSlack } from '../submit';
 import { openTestDb } from './harness';
 import { fakeSafeStorage, fakeAuthTestFetch } from './mocks';
