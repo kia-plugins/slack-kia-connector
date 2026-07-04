@@ -666,6 +666,113 @@ describe('pull — delta', () => {
     expect(batches[2].items).toEqual([]); // final bookkeeping batch
   });
 
+  it('re-walks a long-dormant channel page-aligned (bounded batches, crash-safe cursor) instead of draining the backlog into one batch, while a fresh channel keeps the fast path', async () => {
+    // C1 slept since 2023-11-26 → oldest clamps to 2023-11-25 00:00 UTC
+    // (1700870400); the window to NOW is ~41 days > MAX_DRAIN_WINDOW_SECONDS.
+    const mP1a: SlackMessage = { ts: '1704240600.000100', user: 'U1', text: 'jan 3' };
+    const mP1b: SlackMessage = { ts: '1704153700.000100', user: 'U1', text: 'jan 2 late' };
+    const mP2a: SlackMessage = { ts: '1704153650.000100', user: 'U2', text: 'jan 2 early' };
+    const mP2b: SlackMessage = { ts: '1700954000.000100', user: 'U1', text: 'november' };
+    const script: SlackScript = {
+      methods: {
+        'users.list': [usersPage()],
+        'conversations.history': [
+          // C1 backlog, two pages newest→oldest
+          ok({ messages: [mP1a, mP1b], response_metadata: { next_cursor: 'w2' } }),
+          ok({ messages: [mP2a, mP2b] }),
+          // C2 fast-path poll
+          ok({ messages: [] }),
+        ],
+      },
+    };
+    const { fetchFn, calls } = fakeSlack(script);
+    const source = makeSource(fetchFn);
+    const session = makeSession(CREDS);
+
+    const cursor: SlackCursor = {
+      conversations: {
+        C1: { latest_ts: '1701000000.000100', name: '#general', kind: 'public_channel' },
+        C2: {
+          latest_ts: '1704326400.000100',
+          name: '#dev',
+          kind: 'public_channel',
+          last_polled: '2024-01-04T00:00:00.000Z',
+        },
+      },
+      active_threads: [],
+      polls: 3,
+    };
+    const batches = await drain(source.pull(session, cursor));
+
+    const history = calls.filter((c) => c.method === 'conversations.history');
+    // C1's walk is bounded below by the SAME day-start clamp and pages
+    // through the backlog; C2 stays on the single-call fast path.
+    expect(history.map((c) => [c.params.channel, c.params.oldest, c.params.cursor])).toEqual([
+      ['C1', '1700870400', undefined],
+      ['C1', '1700870400', 'w2'],
+      ['C2', '1704240000', undefined],
+    ]);
+
+    // [C1 page batch, C1 completion, C2 poll, final] — never one giant batch.
+    expect(batches).toHaveLength(4);
+    expect(itemKinds(batches[0])).toEqual(['day']); // jan 3, flushed on page 1
+    // page batches ride an UNCHANGED cursor: a crash re-detects the deep
+    // window (old latest_ts) and re-walks idempotently.
+    expect(batches[0].cursor.conversations.C1).toEqual({
+      latest_ts: '1701000000.000100',
+      name: '#general',
+      kind: 'public_channel',
+    });
+    // completion: jan 2 spans BOTH pages yet renders complete, november day
+    // flushes at the end; latest_ts/last_polled advance WITH these items.
+    expect(itemKinds(batches[1])).toEqual(['day', 'day']);
+    const jan2 = batches[1].items[0];
+    if (jan2.kind !== 'day') throw new Error('expected day');
+    expect(jan2.day).toBe(DAY2);
+    expect(jan2.messages.map((m) => m.ts)).toEqual([mP2a.ts, mP1b.ts]);
+    const nov = batches[1].items[1];
+    if (nov.kind !== 'day') throw new Error('expected day');
+    expect(nov.day).toBe('2023-11-25');
+    expect(batches[1].cursor.conversations.C1.latest_ts).toBe(mP1a.ts);
+    expect(batches[1].cursor.conversations.C1.last_polled).toBe(
+      new Date(NOW_MS).toISOString(),
+    );
+  });
+
+  it('emits a file shared across two days only once per run (seenFiles dedupe): one item, one download', async () => {
+    const msgA: SlackMessage = {
+      ts: '1704153700.000100',
+      user: 'U1',
+      text: 'file on day2',
+      files: [F1],
+    };
+    const msgB: SlackMessage = {
+      ts: '1704240800.000100',
+      user: 'U2',
+      text: 'same file again on day3',
+      files: [F1],
+    };
+    const script: SlackScript = {
+      methods: {
+        'users.list': [usersPage()],
+        'conversations.history': [
+          ok({ messages: [] }), // C2
+          ok({ messages: [msgB, msgA] }), // C1
+        ],
+      },
+      downloads: { 'https://files.slack.com/F1': F1_BYTES },
+    };
+    const { fetchFn, calls } = fakeSlack(script);
+    const source = makeSource(fetchFn);
+    const session = makeSession(CREDS);
+
+    const batches = await drain(source.pull(session, liveCursor()));
+
+    // day2 (first sighting) carries the file doc; day3 does not repeat it.
+    expect(itemKinds(batches[1])).toEqual(['day', 'file', 'day']);
+    expect(calls.filter((c) => c.method === 'download')).toHaveLength(1);
+  });
+
   it('refreshes membership on polls % 10 === 1: prunes left channels (and their threads), mini-backfills newly joined ones', async () => {
     const mC3: SlackMessage = { ts: '1704240650.000100', user: 'U1', text: 'new channel msg' };
     const script: SlackScript = {
@@ -842,6 +949,35 @@ describe('pull — delta', () => {
     expect(last.cursor.active_threads).toEqual([
       { ...newThread, last_reply_ts: newReply.ts },
     ]);
+  });
+
+  it('drops an active thread on DROP_CODES from the replies probe, keeping its channel', async () => {
+    const script: SlackScript = {
+      methods: {
+        'users.list': [usersPage()],
+        'conversations.history': [ok({ messages: [] })], // C1 poll
+        'conversations.replies': [{ ok: false, error: 'not_in_channel' }],
+      },
+    };
+    const { fetchFn } = fakeSlack(script);
+    const source = makeSource(fetchFn);
+    const session = makeSession(CREDS);
+
+    const cursor: SlackCursor = {
+      conversations: {
+        C1: { latest_ts: '1704240600.000100', name: '#general', kind: 'public_channel' },
+      },
+      active_threads: [
+        { channel: 'C1', thread_ts: ROOT_TS, last_reply_ts: '1704240550.000200' },
+      ],
+      polls: 3,
+    };
+    const batches = await drain(source.pull(session, cursor));
+
+    // the probe's drop-code drops ONLY the thread; the channel stays polled.
+    const last = batches.at(-1)!;
+    expect(last.cursor.active_threads).toEqual([]);
+    expect(Object.keys(last.cursor.conversations)).toEqual(['C1']);
   });
 
   it('stops polling channels when the request budget is spent, keeping unprobed threads untouched', async () => {

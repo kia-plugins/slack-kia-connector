@@ -67,6 +67,12 @@ export const LIST_REFRESH_EVERY = 10;
 /** Re-read this far behind latest_ts so replies turning a recent message into
  *  a thread root are noticed (replies never appear in channel history). */
 export const DELTA_LOOKBACK_SECONDS = 86_400;
+/** A polled channel whose catch-up window (now − clamped oldest) exceeds this
+ *  is re-walked page-aligned instead of drained into one in-memory batch —
+ *  `oldest` derives from latest_ts, not now, so a channel dormant for months
+ *  (or empty at backfill, latest_ts '0') can hide an unbounded backlog
+ *  behind it. */
+export const MAX_DRAIN_WINDOW_SECONDS = 7 * 86_400;
 
 /** The scopes the pasted token must carry (the user creates their own
  *  internal Slack app from the manifest in the README — internal apps keep
@@ -289,7 +295,9 @@ interface WalkResult {
  * complete when an older day appears — the buffer flush keeps memory bounded
  * to one day regardless of channel size. Yields one batch per history page
  * that has a successor (cursor from `checkpoint`); returns the tail. Used by
- * backfill AND by delta's mini-backfill of newly joined conversations.
+ * backfill, by delta's mini-backfill of newly joined conversations, and —
+ * with `oldest` bounding the window at a local day start — by delta's
+ * page-aligned catch-up of long-dormant channels.
  * Returns null when aborted (the caller must return without completing).
  */
 async function* walkConversation(
@@ -298,6 +306,7 @@ async function* walkConversation(
   resume: BackfillProgress | undefined,
   phase: PullPhase,
   checkpoint: (p: BackfillProgress) => SlackCursor,
+  oldest?: string,
 ): AsyncGenerator<Batch<SlackCursor, SlackItem>, WalkResult | null> {
   let latestTs = resume?.latest_ts ?? '0';
   const active: ActiveThread[] = resume ? snapshot(resume.active_threads) : [];
@@ -319,7 +328,7 @@ async function* walkConversation(
 
   for await (const page of ctx.client.pages<HistoryPage>(
     'conversations.history',
-    { channel: conv.id, limit: 999 },
+    { channel: conv.id, limit: 999, oldest },
     resume?.next_cursor,
   )) {
     if (ctx.session.signal.aborted) return null;
@@ -566,6 +575,38 @@ async function* delta(
         Number(cc.latest_ts) - DELTA_LOOKBACK_SECONDS,
       );
       const oldest = localDayStartTs(String(lookback));
+
+      // A catch-up window this deep means an unbounded backlog: do NOT drain
+      // it into one in-memory array/batch. Route the channel through the
+      // page-aligned walk instead (backfill's machinery), bounded below by
+      // the same day-start `oldest`: per-page batches stay small, page
+      // batches ride an UNCHANGED cursor (a crash re-detects the deep window
+      // and re-walks idempotently), and the clamp keeps every day complete.
+      if (ctx.now() / 1000 - Number(oldest) > MAX_DRAIN_WINDOW_SECONDS) {
+        const result = yield* walkConversation(
+          ctx,
+          conv,
+          undefined,
+          'live',
+          () => snapshot(cursor),
+          oldest,
+        );
+        if (!result) return; // aborted
+        if (Number(result.latestTs) > Number(cc.latest_ts))
+          cc.latest_ts = result.latestTs;
+        for (const t of result.activeThreads) {
+          const known = cursor.active_threads.find(
+            (x) => x.channel === t.channel && x.thread_ts === t.thread_ts,
+          );
+          if (!known) cursor.active_threads.push(t);
+          else if (Number(t.last_reply_ts) > Number(known.last_reply_ts))
+            known.last_reply_ts = t.last_reply_ts;
+        }
+        cc.last_polled = new Date(ctx.now()).toISOString();
+        yield { phase: 'live', items: result.tailItems, cursor: snapshot(cursor) };
+        continue;
+      }
+
       const msgs: SlackMessage[] = [];
       for await (const page of ctx.client.pages<HistoryPage>(
         'conversations.history',
