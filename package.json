@@ -1,34 +1,25 @@
 {
   "name": "slack-kia-connector",
-  "version": "1.0.0",
-  "description": "Slack connector for alpha-cent / KIAgent (paste-token, self-contained).",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Slack connector for KIAgent (new extension platform)",
   "license": "MIT",
-  "private": false,
   "files": [
+    "manifest.json",
     "dist",
-    "manifest.json"
+    "README.md"
   ],
   "scripts": {
     "build": "node build.mjs",
-    "typecheck": "tsc --noEmit",
     "test": "jest",
-    "pack": "npm run build && npm pack"
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/jest": "^29.5.12",
+    "@types/jest": "^29.5.0",
     "@types/node": "^20.11.0",
-    "better-sqlite3": "^11.0.0",
-    "esbuild": "0.23.1",
+    "esbuild": "^0.24.0",
     "jest": "^29.7.0",
-    "ts-jest": "^29.1.2",
-    "typescript": "^5.4.0"
-  },
-  "jest": {
-    "preset": "ts-jest",
-    "testEnvironment": "node",
-    "testMatch": [
-      "<rootDir>/src/**/__tests__/**/*.test.ts"
-    ]
+    "ts-jest": "^29.2.0",
+    "typescript": "^5.6.0"
   }
 }

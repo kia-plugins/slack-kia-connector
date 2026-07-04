@@ -1,92 +1,97 @@
-# Slack connector for alpha-cent / KIAgent
+# Slack connector for KIAgent
 
 Indexes your Slack workspace into your local KIAgent digital memory: every
-channel, DM, and group-DM becomes searchable, kept current by an incremental
-poll that also tracks active threads.
-
-Self-contained, out-of-process plugin — pure Node + `fetch`, no runtime npm
-dependencies, no OAuth redirect. Authentication is a pasted **User OAuth token**
-(`xoxp-…`) from an internal Slack app you create yourself, encrypted at rest with
-the host's safeStorage.
-
-## Host API
-
-Requires alpha-cent host API `^2.0.0`.
+channel, DM, and group DM you are a member of becomes searchable, kept
+current by an incremental poll that also tracks active threads.
 
 ## Install
 
-This connector is published to the official `kia-plugins` marketplace. In
-KIAgent:
+Install **Slack** from the KIAgent marketplace (Settings → Extensions →
+Marketplace → Slack → Install). KIAgent will prompt for the one grant this
+connector needs — `net`, so it can talk to `slack.com` — before it activates.
 
-1. Open **Add a source → Browse the marketplace** (or the Marketplace screen).
-2. Find **Slack** under the official store and click **Install**.
-3. Review the requested permissions (`db:read`, `db:write`, `net`, `secrets`)
-   and confirm.
+## Connect your workspace
 
-Then add an account:
+Authentication is a pasted **User OAuth Token** (`xoxp-…`) from an internal
+Slack app you create yourself. An internal, customer-built app keeps Slack's
+standard (non-Marketplace) rate limits — never bundle OAuth; the paste-token
+flow is load-bearing for backfill.
 
-1. Go to <https://api.slack.com/apps> → **Create New App → From a manifest** and
-   paste the manifest the wizard shows you (it requests only read scopes:
-   `channels`, `groups`, `im`, `mpim` history/read, `users:read`, `files:read`).
-2. **Install App → Install to Workspace**, then copy the **User OAuth Token**
-   (`xoxp-…`).
-3. Paste the token into the connector's setup field.
+1. Go to <https://api.slack.com/apps?new_app=1> → **Create New App → From a
+   manifest**, pick your workspace, and paste this manifest (read-only
+   scopes):
 
-An internal app keeps Slack's standard (non-Marketplace) rate limits — never
-bundle OAuth; the paste-token flow is load-bearing.
+   ```yaml
+   display_information:
+     name: KIAgent
+     description: Personal digital memory indexing (runs locally on your Mac)
+   oauth_config:
+     scopes:
+       user:
+         - channels:history
+         - channels:read
+         - groups:history
+         - groups:read
+         - im:history
+         - im:read
+         - mpim:history
+         - mpim:read
+         - users:read
+         - files:read
+   settings:
+     org_deploy_enabled: false
+     socket_mode_enabled: false
+     token_rotation_enabled: false
+   ```
 
-### Install from a release tarball (Tier 2)
+2. On the app page: **Install App → Install to Workspace**, then copy the
+   **User OAuth Token** (`xoxp-…` — NOT the Bot token `xoxb-…`).
+3. In KIAgent, add a Slack account and paste the token when prompted. The
+   connector verifies it (and its scopes) against Slack's `auth.test` before
+   saving it into the encrypted vault, and shows your workspace name as the
+   account identifier.
 
-You can also install directly from a published GitHub release: paste the
-release's `.tgz` URL and its integrity hash into KIAgent's "Install from URL"
-dialog.
+## What gets indexed
 
-## What it indexes
+- One `slack.day` document per channel/DM/group-DM per local-time day.
+- One `slack.thread` document per thread (root + replies), re-written as
+  replies arrive.
+- File attachments as `file` documents (children of their day/thread doc).
+  Bytes are handed to the platform, which converts or OCRs them locally;
+  files over 50 MB are indexed by metadata only.
+- Metadata: channel id/name, conversation type, participants, message
+  timestamps.
 
-- One `slack_channel_day` document per channel/DM/group-DM per local-time day.
-- One `slack_thread` document per thread (root + replies), re-written as replies
-  arrive.
-- File attachments as `file` documents. Convertible files are rendered to
-  Markdown on the first pass; unconvertible images/PDFs keep `markdown: null` so
-  the host auto-enrolls them into the deep-extraction (OCR/VLM) pass. Raw bytes
-  are cached locally (content-addressed under `<dataDir>/slack/media/<sha256>`)
-  and re-read by the exported `makeByteSource` — no re-download from Slack.
-- Metadata: channel id/name, participants, message timestamps, attachment ids.
+## Sync behavior
 
-Backfill walks every conversation you're a member of; delta polls newest-first
-within a request budget, re-reading a 24h lookback so replies that turn a recent
-message into a thread root are noticed, and prunes channels you've left.
+- **Backfill:** on first connect, the connector walks the full history of
+  every conversation you're a member of, resuming page-aligned if
+  interrupted — even mid-channel.
+- **Live sync:** afterwards it polls every **15 minutes** within a small
+  request budget: stalest channels first with a ~24h re-read window (so
+  replies that turn a recent message into a thread root are noticed), plus a
+  pass over threads active in the last 14 days. Channels you leave (or that
+  get archived/deleted) are pruned; newly joined ones are backfilled during
+  the periodic membership refresh.
 
-## Trust model
+## Privacy
 
-This plugin runs in a forked Node process with the permissions you grant at
-install time. It is not sandboxed at the OS level — install only connectors from
-authors you trust. The source is here for audit.
+Your Slack content is fetched directly from Slack's API and written straight
+into your local KIAgent index. The connector has no server of its own and no
+analytics: the only network traffic it makes is between `slack.com` and your
+machine, over the platform's `net` capability — nothing is sent anywhere
+else. The token lives in the platform's encrypted vault, never in config or
+documents.
 
 ## Build from source
 
 ```bash
 npm install
-npm run typecheck
 npm test
+npm run typecheck
 npm run build        # → dist/index.js (self-contained CJS bundle)
-npm run pack         # build + npm pack → slack-kia-connector-<version>.tgz
+npm pack             # → slack-kia-connector-<version>.tgz
 ```
-
-## Releasing a new version
-
-1. Bump `version` in **both** `package.json` and `manifest.json` (must match).
-2. `npm install` (if deps changed) → `npm test` → `npm run pack`.
-3. Compute the integrity hash:
-   ```bash
-   openssl dgst -sha512 -binary slack-kia-connector-<version>.tgz \
-     | { printf 'sha512-'; base64; }
-   ```
-4. Publish the GitHub release with the tarball as an asset:
-   ```bash
-   gh release create v<version> slack-kia-connector-<version>.tgz \
-     --title "v<version>" --notes "Integrity: sha512-…"
-   ```
 
 ## License
 
