@@ -1,3 +1,5 @@
+// ── Slack wire shapes (unchanged from v1) ───────────────────────────────────
+
 export type ConversationKind =
   | 'public_channel'
   | 'private_channel'
@@ -39,6 +41,8 @@ export interface SlackMessage {
   files?: SlackFile[];
 }
 
+// ── Cursor (v1 SlackCursor ported verbatim — it is already crash-safe) ──────
+
 export interface CursorConversation {
   latest_ts: string;
   name: string;
@@ -56,7 +60,7 @@ export interface ActiveThread {
 
 /** Page-aligned resume point inside one conversation's backfill walk. A giant
  *  channel takes hours to walk; without this, every error or app restart
- *  re-walks it from the newest message. Persisted after each history page. */
+ *  re-walks it from the newest message. Committed with each history page. */
 export interface BackfillProgress {
   conversation_id: string;
   /** conversations.history cursor for the next unprocessed page. */
@@ -72,7 +76,7 @@ export interface BackfillProgress {
   day_buf: SlackMessage[];
 }
 
-/** Shape persisted in sync_state.cursor_json for source='slack'. */
+/** Persisted as the account cursor (committed transactionally with items). */
 export interface SlackCursor {
   conversations: Record<string, CursorConversation>;
   active_threads: ActiveThread[];
@@ -84,12 +88,57 @@ export interface SlackCursor {
   polls?: number;
 }
 
-export interface SlackToken {
-  access_token: string;
-  team_id: string;
-  user_id: string;
-  team_name: string;
-  /** e.g. 'https://acme.slack.com/' (from auth.test `url`). */
-  team_url: string;
-  scope: string;
+// ── Items (pull output; toDocument input — everything pre-resolved) ─────────
+
+/** One message, fully resolved at pull time (user names looked up, mrkdwn
+ *  already rendered to markdown) so toDocument stays PURE. */
+export interface RenderedMessage {
+  ts: string;
+  userName: string;
+  /** renderMrkdwn output — markdown, not raw mrkdwn. */
+  text: string;
+  fileIds: string[];
 }
+
+export interface DayItem {
+  kind: 'day';
+  channelId: string;
+  channelName: string;
+  convKind: ConversationKind;
+  /** Local YYYY-MM-DD. Carries the COMPLETE day's messages, always —
+   *  v2 upserts replace whole documents (no read-modify-write). */
+  day: string;
+  teamUrl: string;
+  /** Ascending by ts. */
+  messages: RenderedMessage[];
+}
+
+export interface ThreadItem {
+  kind: 'thread';
+  channelId: string;
+  channelName: string;
+  threadTs: string;
+  teamUrl: string;
+  /** Root + replies, ascending by ts — always the FULL thread. */
+  messages: RenderedMessage[];
+}
+
+export interface FileItem {
+  kind: 'file';
+  id: string;
+  filename: string;
+  mime: string;
+  sizeBytes: number;
+  /** Absent when the file exceeds MAX_FILE_BYTES (extraction_status
+   *  'too_large'). Download failures never become items at all. */
+  bytes?: Uint8Array;
+  urlPrivate: string;
+  channelId: string;
+  ts: string;
+  /** The day/thread doc this file belongs to — emitted in the SAME batch so
+   *  the engine resolves parentage in-transaction. */
+  parentExternalId: string;
+  parentType: string;
+}
+
+export type SlackItem = DayItem | ThreadItem | FileItem;

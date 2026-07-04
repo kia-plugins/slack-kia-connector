@@ -1,4 +1,32 @@
-import { setTimeout as nodeSleep } from 'node:timers/promises';
+/**
+ * v2 port of v1 `src/client.ts` (see `git show main:src/client.ts` in this
+ * repo). Preserved verbatim: API base, the 45 req/min sliding window, the 3s
+ * Tier-2 spacing (conversations.list / users.list), 429 handling (Retry-After
+ * clamp [1,60]s, default 5s, ≤5 retries), transient network/5xx exponential
+ * backoff (2s × 2^n, ≤4 retries), SlackApiError with 401 tagging for auth
+ * error codes, the resumable `pages()` paginator, and bearer `download()`.
+ *
+ * Deltas from v1:
+ *  1. All I/O goes through `deps.fetch` — the host's `net.fetch` surface —
+ *     NEVER the global fetch. The host resolves to a plain object
+ *     (status / statusText / headers with lowercase keys / body: Uint8Array),
+ *     so responses are parsed manually and `.ok` is computed from `status`.
+ *  2. Token is a constructor dep (one client instance per pull) — v1 read it
+ *     via getToken().
+ *  3. Retry warnings no longer go to console — the client is silent; callers
+ *     log through session.log.
+ */
+
+export type NetFetch = (url: string, init?: unknown) => Promise<unknown>;
+
+/** The host `net.fetch` surface resolves to this shape — header keys are
+ *  lowercase (built via Object.fromEntries(res.headers.entries())). */
+export interface HostResponse {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: Uint8Array;
+}
 
 export const SLACK_API_BASE = 'https://slack.com/api';
 /** Conservative Tier 3 budget (posted limit ~50/min for internal apps). */
@@ -15,8 +43,9 @@ const MAX_TRANSIENT_RETRIES = 4;
 const TRANSIENT_BACKOFF_MS = 2_000; // 2s, 4s, 8s, 16s
 const MAX_RATE_LIMIT_RETRIES = 5;
 
-/** Slack error codes meaning the token is dead or under-scoped. code=401 makes
- *  the scheduler's isAuthError() flag the account needs_reauth. */
+/** Slack error codes meaning the token is dead or under-scoped. code=401 lets
+ *  callers (isAuthError) tell "reconnect the account" apart from transient
+ *  per-channel failures. */
 const AUTH_ERROR_CODES = new Set([
   'invalid_auth',
   'account_inactive',
@@ -39,17 +68,22 @@ export class SlackApiError extends Error {
   }
 }
 
+/** Token dead / revoked / under-scoped — every later call would fail the same
+ *  way, so these always PROPAGATE out of pull. */
+export const isAuthError = (e: unknown): boolean =>
+  e instanceof SlackApiError && e.code === 401;
+
 export interface SlackClientDeps {
-  getToken: () => string;
-  fetchFn?: typeof fetch;
-  sleepFn?: (ms: number) => Promise<void>;
-  nowFn?: () => number;
+  fetch: NetFetch;
+  token: string;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
   requestsPerMinute?: number;
 }
 
 type Params = Record<string, string | number | boolean | undefined>;
 
-interface SlackEnvelope {
+export interface SlackEnvelope {
   ok: boolean;
   error?: string;
   response_metadata?: { next_cursor?: string };
@@ -63,7 +97,7 @@ export class SlackClient {
 
   private lastByMethod = new Map<string, number>();
 
-  private readonly fetchFn: typeof fetch;
+  private readonly fetchFn: NetFetch;
 
   private readonly sleepFn: (ms: number) => Promise<void>;
 
@@ -72,9 +106,10 @@ export class SlackClient {
   private readonly rpm: number;
 
   constructor(private readonly deps: SlackClientDeps) {
-    this.fetchFn = deps.fetchFn ?? fetch;
-    this.sleepFn = deps.sleepFn ?? (async (ms) => void (await nodeSleep(ms)));
-    this.now = deps.nowFn ?? Date.now;
+    this.fetchFn = deps.fetch;
+    this.sleepFn =
+      deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.now = deps.now ?? Date.now;
     this.rpm = deps.requestsPerMinute ?? REQUESTS_PER_MINUTE;
   }
 
@@ -110,17 +145,17 @@ export class SlackClient {
     let rateLimited = 0;
     for (;;) {
       await this.acquire(method);
-      let res: Awaited<ReturnType<typeof fetch>>;
+      let res: HostResponse;
       try {
         // eslint-disable-next-line no-await-in-loop
-        res = await this.fetchFn(`${SLACK_API_BASE}/${method}`, {
+        res = (await this.fetchFn(`${SLACK_API_BASE}/${method}`, {
           method: 'POST',
           headers: {
-            authorization: `Bearer ${this.deps.getToken()}`,
+            authorization: `Bearer ${this.deps.token}`,
             'content-type': 'application/x-www-form-urlencoded',
           },
           body: body.toString(),
-        });
+        })) as HostResponse;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (transient >= MAX_TRANSIENT_RETRIES)
@@ -128,12 +163,8 @@ export class SlackClient {
             `slack ${method}: network error after ${transient + 1} attempts: ${msg}`,
           );
         transient += 1;
-        const wait = TRANSIENT_BACKOFF_MS * 2 ** (transient - 1);
-        console.warn(
-          `[slack] ${method} network error (retry ${transient}/${MAX_TRANSIENT_RETRIES} in ${wait / 1000}s): ${msg}`,
-        );
         // eslint-disable-next-line no-await-in-loop
-        await this.sleepFn(wait);
+        await this.sleepFn(TRANSIENT_BACKOFF_MS * 2 ** (transient - 1));
         continue;
       }
       if (res.status === 429) {
@@ -144,7 +175,7 @@ export class SlackClient {
         rateLimited += 1;
         // Retry-After may be missing or a non-numeric HTTP-date; both must not
         // collapse to a 0ms busy-retry. Default to 5s, floor 1s, cap 60s.
-        const raw = Number(res.headers.get('retry-after'));
+        const raw = Number(res.headers['retry-after']);
         const after = Number.isFinite(raw) ? Math.min(Math.max(1, raw), 60) : 5;
         // eslint-disable-next-line no-await-in-loop
         await this.sleepFn(after * 1000);
@@ -156,17 +187,13 @@ export class SlackClient {
             `slack ${method}: HTTP ${res.status} (after ${transient + 1} attempts)`,
           );
         transient += 1;
-        const wait = TRANSIENT_BACKOFF_MS * 2 ** (transient - 1);
-        console.warn(
-          `[slack] ${method} HTTP ${res.status} (retry ${transient}/${MAX_TRANSIENT_RETRIES} in ${wait / 1000}s)`,
-        );
         // eslint-disable-next-line no-await-in-loop
-        await this.sleepFn(wait);
+        await this.sleepFn(TRANSIENT_BACKOFF_MS * 2 ** (transient - 1));
         continue;
       }
-      if (!res.ok) throw new Error(`slack ${method}: HTTP ${res.status}`);
-      // eslint-disable-next-line no-await-in-loop
-      const json = (await res.json()) as T;
+      if (res.status < 200 || res.status >= 300)
+        throw new Error(`slack ${method}: HTTP ${res.status}`);
+      const json = JSON.parse(new TextDecoder().decode(res.body)) as T;
       if (!json.ok)
         throw new SlackApiError(json.error ?? 'unknown_error', method);
       return json;
@@ -189,12 +216,13 @@ export class SlackClient {
   }
 
   /** Download a url_private file with bearer auth. */
-  async download(url: string): Promise<Buffer> {
+  async download(url: string): Promise<Uint8Array> {
     await this.acquire('files.download');
-    const res = await this.fetchFn(url, {
-      headers: { authorization: `Bearer ${this.deps.getToken()}` },
-    });
-    if (!res.ok) throw new Error(`slack file download: HTTP ${res.status}`);
-    return Buffer.from(await res.arrayBuffer());
+    const res = (await this.fetchFn(url, {
+      headers: { authorization: `Bearer ${this.deps.token}` },
+    })) as HostResponse;
+    if (res.status < 200 || res.status >= 300)
+      throw new Error(`slack file download: HTTP ${res.status}`);
+    return res.body;
   }
 }
