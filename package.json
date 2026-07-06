@@ -1,6 +1,6 @@
 {
   "name": "slack-kia-connector",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "private": true,
   "description": "Slack connector for KIAgent (new extension platform)",
   "license": "MIT",

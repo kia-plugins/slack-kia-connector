@@ -90,6 +90,25 @@ export const SLACK_USER_SCOPES = [
   'files:read',
 ];
 
+const SCOPE_LINES = SLACK_USER_SCOPES.map((s) => `        - ${s}`).join('\n');
+
+/** The internal-app manifest the user pastes at api.slack.com — an internal,
+ *  customer-built app keeps Slack's standard (non-Marketplace) rate limits;
+ *  never bundle OAuth (see README "Connect your workspace"). Shown as a
+ *  copyable block in the connect wizard's x-steps. */
+export const SLACK_APP_MANIFEST = `display_information:
+  name: KIAgent
+  description: Personal digital memory indexing (runs locally on your Mac)
+oauth_config:
+  scopes:
+    user:
+${SCOPE_LINES}
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
+`;
+
 /** Kicked out / deleted / archived — drop the conversation from the cursor
  *  and keep polling the rest. */
 const DROP_CODES = new Set([
@@ -796,11 +815,27 @@ export function createSlackSource(
       const answers = await auth.prompt({
         type: 'object',
         required: ['password'],
+        description:
+          'Slack indexing uses a token from an internal Slack app you create yourself — this keeps standard rate limits and stays read-only.',
+        'x-steps': [
+          {
+            title: 'Create the Slack app',
+            body: 'api.slack.com/apps → Create New App → From a manifest → pick your workspace → paste this:',
+            link: 'https://api.slack.com/apps?new_app=1',
+            copy: SLACK_APP_MANIFEST,
+          },
+          {
+            title: 'Install to your workspace',
+            body: 'On the app page: Install App → Install to Workspace, then copy the User OAuth Token from OAuth & Permissions.',
+          },
+        ],
         properties: {
           password: {
             type: 'string',
-            title: 'User OAuth Token (xoxp-…)',
+            title: 'User OAuth Token',
             format: 'password',
+            examples: ['xoxp-…'],
+            description: 'Starts with xoxp- (a user token, not the xoxb- bot token).',
           },
         },
       });

@@ -247,11 +247,18 @@ describe('connect', () => {
 
     const schema = getSchema() as {
       required: string[];
-      properties: Record<string, { format?: string }>;
+      properties: Record<string, { format?: string; examples?: string[] }>;
+      'x-steps': Array<{ title: string; link?: string; copy?: string }>;
     };
     expect(schema.required).toEqual(['password']);
     expect(schema.properties.password.format).toBe('password');
     expect(calls).toHaveLength(0);
+
+    // The schema carries the guided-setup conventions the app renders.
+    expect(schema['x-steps']).toHaveLength(2);
+    expect(schema['x-steps'][0].link).toBe('https://api.slack.com/apps?new_app=1');
+    expect(schema['x-steps'][0].copy).toContain('- channels:history');
+    expect(schema.properties.password.examples?.[0]).toBe('xoxp-…');
   });
 
   it('rejects any non-xoxp prefix before the network', async () => {
