@@ -1,9 +1,16 @@
 {
   "id": "kia.slack",
   "name": "Slack",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "engine": "^1.0.0",
   "entry": "dist/index.js",
-  "caps": ["net"],
-  "contributes": { "sources": ["slack"] }
+  "caps": [
+    "net"
+  ],
+  "contributes": {
+    "sources": [
+      "slack"
+    ]
+  },
+  "icon": "icon.png"
 }
