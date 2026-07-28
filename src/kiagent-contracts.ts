@@ -1,5 +1,5 @@
 /**
- * Vendored snapshot of kiagent-core src/shared/contracts.ts @ c6ee4e0 — the
+ * Vendored snapshot of kiagent-core src/shared/contracts.ts @ c2a91d1 — the
  * contract IS the SDK (LEFTOVERS #15); do not edit, re-vendor.
  */
 
@@ -326,6 +326,42 @@ export interface Source<Cursor = unknown, Item = unknown> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 3b. OUTBOUND — frozen drafts, user-gated sending
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** What a Sender is asked to send — plain data in, plain data out, no
+ *  callbacks: third-party senders run out-of-process over Connector RPC. */
+export interface SendIntent {
+  accountId: AccountId;
+  kind: 'reply' | 'new';
+  outboundRef?: unknown;
+  to?: string[];
+  cc?: string[];
+  subject?: string;
+  bodyMarkdown: string;
+  threading?: Record<string, unknown>;
+}
+
+export interface SendResult {
+  externalMessageId?: string;
+}
+
+/** What the host hands a Sender alongside the intent. Bundled senders read
+ *  the vault themselves and ignore it; an extension's Sender cannot — it
+ *  runs out-of-process with no vault access, so the host resolves the
+ *  account's credentials and passes them in at send time. */
+export interface SenderContext {
+  credentials: Credentials | null;
+}
+
+/** Outbound transport for one source id. Reachable ONLY from the send
+ *  pipeline — i.e. only after a confirmation gate — never from the MCP
+ *  plane directly. */
+export interface Sender {
+  send(intent: SendIntent, ctx?: SenderContext): Promise<SendResult>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 4. THE INFERENCE PLANE — LLM / vision behind one queue
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -447,7 +483,12 @@ export type Cap =
   | 'ui'
   | 'commands'
   | 'inference'
-  | 'events';
+  | 'events'
+  /** May deliver outbound messages through the host's send pipeline — the
+   *  host calls the extension's Sender only AFTER a user confirmation gate;
+   *  extensions never initiate sends. Not a host namespace: there is no
+   *  host.send.* surface. */
+  | 'send';
 
 export interface Manifest {
   id: ExtensionId;
@@ -462,6 +503,7 @@ export interface Manifest {
     workers?: string[];
     tools?: string[];
     providers?: string[];
+    senders?: string[];
     commands?: Array<{ id: string; title: string }>;
   };
   caps: Cap[];
@@ -517,6 +559,8 @@ export interface CapSurfaces {
       emit(event: string, payload: unknown): void;
     };
   };
+  /** Host-initiated only — no extension→host surface. */
+  send: {};
 }
 
 export interface BaseHost {
@@ -542,6 +586,9 @@ export interface ExtensionModule<G extends Cap = Cap> {
     workers?: Worker[];
     tools?: McpTool[];
     providers?: InferenceProvider[];
+    /** Senders keyed by SOURCE id — each must be listed in
+     *  contributes.senders and its source contributed by this extension. */
+    senders?: Record<string, Sender>;
   }>;
   deactivate?(): void | Promise<void>;
 }

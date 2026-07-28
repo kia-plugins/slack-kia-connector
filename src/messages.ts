@@ -113,6 +113,11 @@ export function dayToDocument(item: DayItem): DocumentInput | null {
     metadata: {
       ...baseMetadata(item.channelId, item.channelName, msgs),
       conversation_type: item.convKind,
+      // Reply target for the outbound layer: `ref` round-trips verbatim to
+      // this source's Sender; `display` is what the user sees on the confirm
+      // surface. channelName ALREADY carries '#' / 'DM with …' / 'Group DM:'
+      // (conversationDisplayName) — never prefix it again.
+      outbound: { ref: { channel: item.channelId }, display: item.channelName },
     },
     createdAt: tsToDate(msgs[0].ts).toISOString(),
   };
@@ -137,6 +142,11 @@ export function threadToDocument(item: ThreadItem): DocumentInput | null {
     metadata: {
       ...baseMetadata(item.channelId, item.channelName, msgs),
       slack_thread_ts: item.threadTs,
+      // Same as the day doc, but replies land IN the thread (thread_ts).
+      outbound: {
+        ref: { channel: item.channelId, thread_ts: item.threadTs },
+        display: `${item.channelName} (thread)`,
+      },
     },
     createdAt: tsToDate(msgs[0].ts).toISOString(),
   };

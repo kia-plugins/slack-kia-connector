@@ -7,8 +7,10 @@ current by an incremental poll that also tracks active threads.
 ## Install
 
 Install **Slack** from the KIAgent marketplace (Settings → Extensions →
-Marketplace → Slack → Install). KIAgent will prompt for the one grant this
-connector needs — `net`, so it can talk to `slack.com` — before it activates.
+Marketplace → Slack → Install). KIAgent will prompt for the two grants this
+connector needs before it activates: `net`, so it can talk to `slack.com`,
+and `send`, so a reply you confirm in KIAgent can be posted back to Slack.
+`send` is host-initiated only — the connector can never start a send itself.
 
 ## Connect your workspace
 
@@ -18,8 +20,9 @@ standard (non-Marketplace) rate limits — never bundle OAuth; the paste-token
 flow is load-bearing for backfill.
 
 1. Go to <https://api.slack.com/apps?new_app=1> → **Create New App → From a
-   manifest**, pick your workspace, and paste this manifest (read-only
-   scopes):
+   manifest**, pick your workspace, and paste this manifest (read scopes
+   plus `chat:write`, which is used only to post replies you confirm in
+   KIAgent):
 
    ```yaml
    display_information:
@@ -38,6 +41,7 @@ flow is load-bearing for backfill.
          - mpim:read
          - users:read
          - files:read
+         - chat:write
    settings:
      org_deploy_enabled: false
      socket_mode_enabled: false

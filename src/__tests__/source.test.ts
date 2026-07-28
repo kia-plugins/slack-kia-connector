@@ -233,7 +233,7 @@ describe('connect', () => {
   }
 
   const ALL_SCOPES =
-    'channels:history, channels:read, groups:history, groups:read, im:history, im:read, mpim:history, mpim:read, users:read, files:read';
+    'channels:history, channels:read, groups:history, groups:read, im:history, im:read, mpim:history, mpim:read, users:read, files:read, chat:write';
 
   it('prompts with a password field and rejects a bot token BEFORE any network call', async () => {
     const calls: string[] = [];
@@ -1117,8 +1117,30 @@ describe('toDocument (pure)', () => {
         participants: ['Bob B', 'alice'],
         first_message_at: '2024-01-02T00:00:50.000Z',
         last_message_at: '2024-01-02T00:01:40.000Z',
+        // Reply target for the outbound layer: channel-level, no thread_ts.
+        // `display` is channelName VERBATIM — it already carries the '#'.
+        outbound: { ref: { channel: 'C1' }, display: '#general' },
       },
       createdAt: '2024-01-02T00:00:50.000Z',
+    });
+  });
+
+  it('carries the DM/group-DM display name into outbound without adding a #', () => {
+    const doc = source.toDocument({
+      kind: 'day',
+      channelId: 'D9',
+      channelName: 'DM with Alice',
+      convKind: 'im',
+      day: DAY2,
+      teamUrl: 'https://acme.slack.com/',
+      messages: [
+        { ts: '1704153650.000100', userName: 'alice', text: 'hi', fileIds: [] },
+      ],
+    }) as DocumentInput;
+
+    expect(doc.metadata.outbound).toEqual({
+      ref: { channel: 'D9' },
+      display: 'DM with Alice',
     });
   });
 
@@ -1146,6 +1168,11 @@ describe('toDocument (pure)', () => {
       slack_thread_ts: ROOT_TS,
       message_count: 2,
       participants: ['Bob B', 'alice'],
+    });
+    // Thread docs reply INTO the thread: the ref carries thread_ts.
+    expect(doc.metadata.outbound).toEqual({
+      ref: { channel: 'C1', thread_ts: ROOT_TS },
+      display: '#general (thread)',
     });
     expect(doc.createdAt).toBe('2024-01-03T00:08:20.000Z');
   });
@@ -1181,6 +1208,9 @@ describe('toDocument (pure)', () => {
       parent: { externalId: `C1:${DAY2}`, type: 'slack.day' },
       createdAt: '2024-01-02T00:01:40.000Z',
     });
+    // A file is not a reply target — no outbound ref (the toEqual above is
+    // exact; this states the rule so a later loosening still trips).
+    expect(withBytes.metadata.outbound).toBeUndefined();
 
     const tooLarge = source.toDocument({
       ...base,

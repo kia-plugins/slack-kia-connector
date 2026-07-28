@@ -88,6 +88,9 @@ export const SLACK_USER_SCOPES = [
   'mpim:read',
   'users:read',
   'files:read',
+  // Outbound: posting a reply the user confirmed in the app. Every other
+  // scope here is read-only; nothing sends without a confirmation gate.
+  'chat:write',
 ];
 
 const SCOPE_LINES = SLACK_USER_SCOPES.map((s) => `        - ${s}`).join('\n');
@@ -816,7 +819,7 @@ export function createSlackSource(
         type: 'object',
         required: ['password'],
         description:
-          'Slack indexing uses a token from an internal Slack app you create yourself — this keeps standard rate limits and stays read-only.',
+          'Slack indexing uses a token from an internal Slack app you create yourself — this keeps standard rate limits. The scopes are read-only apart from chat:write, which is used only to post replies you confirm in KIAgent.',
         'x-steps': [
           {
             title: 'Create the Slack app',
