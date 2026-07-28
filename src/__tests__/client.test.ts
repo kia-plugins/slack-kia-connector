@@ -22,7 +22,7 @@ function jsonResponse(
 
 function makeClient(
   fetchFn: NetFetch,
-  extra: { requestsPerMinute?: number } = {},
+  extra: { requestsPerMinute?: number; maxTransientRetries?: number } = {},
 ) {
   const sleeps: number[] = [];
   let clock = 10_000_000; // arbitrary starting point >> WINDOW_MS
@@ -161,6 +161,64 @@ describe('SlackClient.call', () => {
 
     expect(result).toEqual({ ok: true });
     expect(sleeps).toEqual([2_000, 4_000]);
+  });
+
+  // maxTransientRetries exists for NON-IDEMPOTENT writes (chat.postMessage
+  // has no idempotency key): a retried network failure that Slack had already
+  // accepted would double-post. It governs the transient paths ONLY.
+  it('maxTransientRetries: 0 disables 5xx retries — one attempt, no sleep', async () => {
+    const fetchFn = jest.fn(async () => jsonResponse(503, {}));
+    const { client, sleeps } = makeClient(fetchFn, { maxTransientRetries: 0 });
+
+    await expect(client.call('chat.postMessage', {})).rejects.toThrow(
+      /HTTP 503/,
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('maxTransientRetries: 0 disables network-throw retries too', async () => {
+    const fetchFn = jest.fn(async () => {
+      throw new Error('ECONNRESET');
+    });
+    const { client, sleeps } = makeClient(fetchFn, { maxTransientRetries: 0 });
+
+    await expect(client.call('chat.postMessage', {})).rejects.toThrow(
+      /ECONNRESET/,
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('maxTransientRetries: 0 leaves the 429 ladder intact (rate limits cannot duplicate a write)', async () => {
+    let call = 0;
+    const fetchFn = jest.fn(async () => {
+      call += 1;
+      if (call === 1) return jsonResponse(429, {}, { 'retry-after': '2' });
+      return jsonResponse(200, { ok: true, ts: '1.2' });
+    });
+    const { client, sleeps } = makeClient(fetchFn, { maxTransientRetries: 0 });
+
+    expect(await client.call('chat.postMessage', {})).toEqual({
+      ok: true,
+      ts: '1.2',
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([2_000]);
+  });
+
+  it('defaults to the full 4-retry transient ladder when the knob is omitted', async () => {
+    let call = 0;
+    const fetchFn = jest.fn(async () => {
+      call += 1;
+      if (call <= 4) return jsonResponse(500, {});
+      return jsonResponse(200, { ok: true });
+    });
+    const { client, sleeps } = makeClient(fetchFn);
+
+    expect(await client.call('conversations.history', {})).toEqual({ ok: true });
+    expect(fetchFn).toHaveBeenCalledTimes(5);
+    expect(sleeps).toEqual([2_000, 4_000, 8_000, 16_000]);
   });
 
   it('throws plain Error on unexpected non-2xx status (no retry)', async () => {

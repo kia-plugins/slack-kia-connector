@@ -79,6 +79,13 @@ export interface SlackClientDeps {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   requestsPerMinute?: number;
+  /** Retries for TRANSIENT network/5xx failures only (default 4). Reads want
+   *  the full ladder; a NON-IDEMPOTENT write does not — chat.postMessage has
+   *  no idempotency key, so a network failure AFTER Slack accepted the write
+   *  would double-post on retry. Senders pass 0. The 429 ladder is unaffected
+   *  at any setting: Slack rejects a rate-limited call before processing it,
+   *  so retrying it cannot duplicate anything. */
+  maxTransientRetries?: number;
 }
 
 type Params = Record<string, string | number | boolean | undefined>;
@@ -105,12 +112,15 @@ export class SlackClient {
 
   private readonly rpm: number;
 
+  private readonly maxTransient: number;
+
   constructor(private readonly deps: SlackClientDeps) {
     this.fetchFn = deps.fetch;
     this.sleepFn =
       deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = deps.now ?? Date.now;
     this.rpm = deps.requestsPerMinute ?? REQUESTS_PER_MINUTE;
+    this.maxTransient = deps.maxTransientRetries ?? MAX_TRANSIENT_RETRIES;
   }
 
   private async acquire(method: string): Promise<void> {
@@ -158,7 +168,7 @@ export class SlackClient {
         })) as HostResponse;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (transient >= MAX_TRANSIENT_RETRIES)
+        if (transient >= this.maxTransient)
           throw new Error(
             `slack ${method}: network error after ${transient + 1} attempts: ${msg}`,
           );
@@ -182,7 +192,7 @@ export class SlackClient {
         continue;
       }
       if (res.status >= 500) {
-        if (transient >= MAX_TRANSIENT_RETRIES)
+        if (transient >= this.maxTransient)
           throw new Error(
             `slack ${method}: HTTP ${res.status} (after ${transient + 1} attempts)`,
           );

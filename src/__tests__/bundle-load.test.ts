@@ -29,5 +29,8 @@ describe('dist bundle loads standalone', () => {
 
     expect(result.sources).toHaveLength(1);
     expect(result.sources?.[0]?.descriptor.id).toBe('slack');
+    // The sender is contributed from the SAME activate() — manifest
+    // contributes.senders lists 'slack', so the host looks for it here.
+    expect(result.senders?.slack).toBeDefined();
   }, 30_000);
 });
