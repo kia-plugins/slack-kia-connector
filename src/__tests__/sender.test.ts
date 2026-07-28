@@ -160,9 +160,17 @@ describe('slack sender', () => {
     const { fetchFn } = fakeSlack([{ json: { ok: false, error: 'missing_scope' } }]);
     const sender = createSlackSender(makeHost(fetchFn));
 
-    await expect(
-      sender.send(makeIntent(), withToken('xoxp-abc')),
-    ).rejects.toThrow(/chat:write[\s\S]*in Settings/);
+    const err = await sender
+      .send(makeIntent(), withToken('xoxp-abc'))
+      .then(
+        () => new Error('expected a rejection'),
+        (e: unknown) => e as Error,
+      );
+
+    expect(err.message).toMatch(/chat:write[\s\S]*in Settings/);
+    // Shaped for core's AUTH_MARKERS (→ kind 'auth', retryable) — the
+    // `chat:write` assertion alone stays green without the word `reconnect`.
+    expect(err.message).toMatch(/reconnect .* in Settings/);
   });
 
   // The other five AUTH_ERROR_CODES are provable PRE-delivery rejections;
