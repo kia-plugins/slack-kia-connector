@@ -128,6 +128,20 @@ async function drain(
   return out;
 }
 
+/** Drains `iter` and returns the rejection reason — for asserting on error
+ *  SHAPE (message, `code`, instanceof), not just the message substring
+ *  `.rejects.toThrow` checks. Throws if the pull unexpectedly resolves. */
+async function captureRejection(
+  iter: AsyncIterable<Batch<SlackCursor, SlackItem>>,
+): Promise<unknown> {
+  try {
+    await drain(iter);
+  } catch (e) {
+    return e;
+  }
+  throw new Error('expected pull() to reject, but it resolved');
+}
+
 const ok = (extra: Record<string, unknown>) => ({ ok: true, ...extra });
 
 const usersPage = () =>
@@ -571,7 +585,7 @@ describe('pull — backfill', () => {
     expect(batches.at(-1)!.cursor.conversations.C1.latest_ts).toBe(mDay3.ts);
   });
 
-  it('propagates auth errors with a "reconnect the account" message instead of skipping', async () => {
+  it('propagates auth errors with a "reconnect the account" message instead of skipping, tagged code: auth for the engine\'s needsReauth', async () => {
     const script: SlackScript = {
       methods: {
         'users.list': [usersPage()],
@@ -585,20 +599,47 @@ describe('pull — backfill', () => {
     const source = makeSource(fetchFn);
     const session = makeSession(CREDS);
 
-    await expect(drain(source.pull(session, null))).rejects.toThrow(
-      /invalid_auth — reconnect the account$/,
-    );
+    const err = await captureRejection(source.pull(session, null));
+
+    // Message text is unchanged user-facing copy — still a plain Error shape.
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/invalid_auth — reconnect the account$/);
+    // SourceAuthError's `code` is what the engine keys off to commit
+    // `needsReauth` and stop retrying instead of burning the retry budget.
+    expect((err as { code?: string }).code).toBe('auth');
   });
 
-  it('throws before any fetch when the vault has no credentials', async () => {
+  it('throws before any fetch when the vault has no credentials, tagged code: auth', async () => {
     const { fetchFn, calls } = fakeSlack({});
     const source = makeSource(fetchFn);
     const session = makeSession(null);
 
-    await expect(drain(source.pull(session, null))).rejects.toThrow(
-      /no Slack credentials — reconnect the account/,
+    const err = await captureRejection(source.pull(session, null));
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe(
+      'no Slack credentials — reconnect the account',
     );
+    expect((err as { code?: string }).code).toBe('auth');
     expect(calls).toHaveLength(0);
+  });
+
+  it('does not tag a non-auth Slack error with code: auth (must keep retrying, not needsReauth)', async () => {
+    // A Slack error code outside AUTH_ERROR_CODES surfaces during
+    // ensurePreloaded's users.list call, straight out of backfill() with no
+    // per-conversation catch involved — the plainest possible negative case.
+    const script: SlackScript = {
+      methods: { 'users.list': [{ ok: false, error: 'fatal_error' }] },
+    };
+    const { fetchFn } = fakeSlack(script);
+    const source = makeSource(fetchFn);
+    const session = makeSession(CREDS);
+
+    const err = await captureRejection(source.pull(session, null));
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('slack users.list: fatal_error');
+    expect((err as { code?: string }).code).toBeUndefined();
   });
 });
 
@@ -1014,7 +1055,7 @@ describe('pull — delta', () => {
     expect(last.cursor.active_threads).toEqual([thread]);
   });
 
-  it('propagates auth errors from delta with the reconnect suffix', async () => {
+  it('propagates auth errors from delta with the reconnect suffix, tagged code: auth', async () => {
     const script: SlackScript = {
       methods: {
         'users.list': [usersPage()],
@@ -1025,9 +1066,11 @@ describe('pull — delta', () => {
     const source = makeSource(fetchFn);
     const session = makeSession(CREDS);
 
-    await expect(drain(source.pull(session, liveCursor()))).rejects.toThrow(
-      /token_revoked — reconnect the account$/,
-    );
+    const err = await captureRejection(source.pull(session, liveCursor()));
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/token_revoked — reconnect the account$/);
+    expect((err as { code?: string }).code).toBe('auth');
   });
 
   it('emits an oversize file with NO bytes (too_large) without downloading, and skips a file whose download fails', async () => {

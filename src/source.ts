@@ -37,6 +37,7 @@ import {
   type SlackEnvelope,
 } from './client';
 import { SlackUserDirectory } from './users';
+import { SourceAuthError } from './kiagent-source-errors';
 import {
   MAX_FILE_BYTES,
   dayKey,
@@ -782,7 +783,8 @@ export function createSlackSource(
   async function requireToken(session: Session): Promise<string> {
     const creds = await session.credentials();
     const token = creds?.password;
-    if (!token) throw new Error('no Slack credentials — reconnect the account');
+    if (!token)
+      throw new SourceAuthError('no Slack credentials — reconnect the account');
     return token;
   }
 
@@ -901,9 +903,13 @@ export function createSlackSource(
         }
       } catch (e) {
         // The platform surfaces lastError verbatim — make dead-token failures
-        // actionable for the user.
+        // actionable for the user. SourceAuthError's `code: 'auth'` (see
+        // ./kiagent-source-errors) is what drives the engine to
+        // `needsReauth` and stops retries — a plain Error here (or one
+        // converted anywhere upstream of this single boundary) would just
+        // burn the transient-retry budget forever on a dead token.
         if (isAuthError(e))
-          throw new Error(`${errText(e)} — reconnect the account`);
+          throw new SourceAuthError(`${errText(e)} — reconnect the account`);
         throw e;
       }
     },
