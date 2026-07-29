@@ -1,7 +1,7 @@
 {
   "id": "kia.slack",
   "name": "Slack",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "engine": "^1.2.0",
   "entry": "dist/index.js",
   "caps": [
