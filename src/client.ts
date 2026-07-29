@@ -15,18 +15,25 @@
  *     via getToken().
  *  3. Retry warnings no longer go to console — the client is silent; callers
  *     log through session.log.
+ *
+ * The transient/429 retry ladder that used to live inline in `call()` now
+ * comes from `@kiagent/connector-sdk/http` — the SDK's `requestWithRetry` was
+ * extracted verbatim FROM this file, so budgets (4 transient / 5 rate-limit),
+ * backoff base (2s × 2^n) and the Retry-After clamp ([1,60]s, default 5s) are
+ * its defaults and no longer need restating here. What stays local is
+ * everything Slack-specific: the rate window (acquired inside `attempt`, so it
+ * runs before EVERY try including retries), the bearer/form request shape, and
+ * all status/envelope classification after the ladder returns.
  */
+import {
+  requestWithRetry,
+  type HostResponse,
+  type NetFetch,
+} from '@kiagent/connector-sdk/http';
 
-export type NetFetch = (url: string, init?: unknown) => Promise<unknown>;
-
-/** The host `net.fetch` surface resolves to this shape — header keys are
- *  lowercase (built via Object.fromEntries(res.headers.entries())). */
-export interface HostResponse {
-  status: number;
-  statusText: string;
-  headers: Record<string, string>;
-  body: Uint8Array;
-}
+/** Re-exported (erased at build time) so source.ts / sender.ts and the suites
+ *  keep importing the host-fetch shapes from the client they use them with. */
+export type { HostResponse, NetFetch };
 
 export const SLACK_API_BASE = 'https://slack.com/api';
 /** Conservative Tier 3 budget (posted limit ~50/min for internal apps). */
@@ -38,10 +45,10 @@ const TIER2_MIN_INTERVAL_MS = 3_000;
 /** A backfill makes tens of thousands of consecutive calls (a single giant
  *  channel can need 20k+ conversations.replies), so transient 5xx/network
  *  blips are a statistical certainty over its lifetime — retry them with
- *  exponential backoff instead of aborting hours of work. */
+ *  exponential backoff instead of aborting hours of work. Matches the SDK
+ *  ladder's own default; kept explicit because it is this client's documented
+ *  contract with its callers (`maxTransientRetries`). */
 const MAX_TRANSIENT_RETRIES = 4;
-const TRANSIENT_BACKOFF_MS = 2_000; // 2s, 4s, 8s, 16s
-const MAX_RATE_LIMIT_RETRIES = 5;
 
 /** Slack error codes meaning the token is dead or under-scoped. code=401 lets
  *  callers (isAuthError) tell "reconnect the account" apart from transient
@@ -151,14 +158,13 @@ export class SlackClient {
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined) body.set(k, String(v));
     }
-    let transient = 0;
-    let rateLimited = 0;
-    for (;;) {
-      await this.acquire(method);
-      let res: HostResponse;
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        res = (await this.fetchFn(`${SLACK_API_BASE}/${method}`, {
+    // The rate window is acquired INSIDE attempt(), not around the ladder: a
+    // retry is a new request against Slack's budget, so it must wait its turn
+    // exactly like a first try.
+    const res = await requestWithRetry(
+      async () => {
+        await this.acquire(method);
+        return (await this.fetchFn(`${SLACK_API_BASE}/${method}`, {
           method: 'POST',
           headers: {
             authorization: `Bearer ${this.deps.token}`,
@@ -166,48 +172,21 @@ export class SlackClient {
           },
           body: body.toString(),
         })) as HostResponse;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (transient >= this.maxTransient)
-          throw new Error(
-            `slack ${method}: network error after ${transient + 1} attempts: ${msg}`,
-          );
-        transient += 1;
-        // eslint-disable-next-line no-await-in-loop
-        await this.sleepFn(TRANSIENT_BACKOFF_MS * 2 ** (transient - 1));
-        continue;
-      }
-      if (res.status === 429) {
-        if (rateLimited >= MAX_RATE_LIMIT_RETRIES)
-          throw new Error(
-            `slack ${method}: HTTP 429 after ${rateLimited + 1} attempts`,
-          );
-        rateLimited += 1;
-        // Retry-After may be missing or a non-numeric HTTP-date; both must not
-        // collapse to a 0ms busy-retry. Default to 5s, floor 1s, cap 60s.
-        const raw = Number(res.headers['retry-after']);
-        const after = Number.isFinite(raw) ? Math.min(Math.max(1, raw), 60) : 5;
-        // eslint-disable-next-line no-await-in-loop
-        await this.sleepFn(after * 1000);
-        continue;
-      }
-      if (res.status >= 500) {
-        if (transient >= this.maxTransient)
-          throw new Error(
-            `slack ${method}: HTTP ${res.status} (after ${transient + 1} attempts)`,
-          );
-        transient += 1;
-        // eslint-disable-next-line no-await-in-loop
-        await this.sleepFn(TRANSIENT_BACKOFF_MS * 2 ** (transient - 1));
-        continue;
-      }
-      if (res.status < 200 || res.status >= 300)
-        throw new Error(`slack ${method}: HTTP ${res.status}`);
-      const json = JSON.parse(new TextDecoder().decode(res.body)) as T;
-      if (!json.ok)
-        throw new SlackApiError(json.error ?? 'unknown_error', method);
-      return json;
-    }
+      },
+      {
+        // `slack ${method}` reproduces this client's historical message
+        // prefixes verbatim — the suites pin them.
+        label: `slack ${method}`,
+        maxTransientRetries: this.maxTransient,
+        sleep: this.sleepFn,
+      },
+    );
+    // The ladder RETURNS every non-429/<500 status; classifying them is ours.
+    if (res.status < 200 || res.status >= 300)
+      throw new Error(`slack ${method}: HTTP ${res.status}`);
+    const json = JSON.parse(new TextDecoder().decode(res.body)) as T;
+    if (!json.ok) throw new SlackApiError(json.error ?? 'unknown_error', method);
+    return json;
   }
 
   /** Iterate a cursor-paginated method, yielding each page. `startCursor`
@@ -225,7 +204,12 @@ export class SlackClient {
     } while (cursor);
   }
 
-  /** Download a url_private file with bearer auth. */
+  /** Download a url_private file with bearer auth.
+   *
+   *  Deliberately NOT on the retry ladder: it has never retried anything, and
+   *  routing it through `requestWithRetry` would both add 5xx/429 retries it
+   *  never had and rewrite its 429 message (`… HTTP 429 after 1 attempts`
+   *  instead of `… HTTP 429`). One attempt, one status check — unchanged. */
   async download(url: string): Promise<Uint8Array> {
     await this.acquire('files.download');
     const res = (await this.fetchFn(url, {
