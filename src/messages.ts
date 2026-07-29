@@ -81,6 +81,13 @@ export function toRendered(
 const section = (m: RenderedMessage) =>
   `**${m.userName}** · ${fmt(tsToDate(m.ts))}\n\n${m.text}`;
 
+/** Day-doc variant: the raw Slack ts rides along so a reply can quote it as
+ *  draft_reply's `target` — the per-message key in `outbound.targets`. Thread
+ *  docs keep the plain section: they reply into the thread as a whole, so a
+ *  visible ts would only invite target keys that resolve to nothing. */
+const daySection = (m: RenderedMessage) =>
+  `**${m.userName}** · ${fmt(tsToDate(m.ts))} · ts ${m.ts}\n\n${m.text}`;
+
 function baseMetadata(
   channelId: string,
   channelName: string,
@@ -102,7 +109,7 @@ export function dayToDocument(item: DayItem): DocumentInput | null {
   const markdown = [
     `# ${item.channelName} — ${item.day}`,
     '---',
-    ...msgs.map(section),
+    ...msgs.map(daySection),
   ].join('\n\n');
   return {
     externalId: `${item.channelId}:${item.day}`,
@@ -117,7 +124,18 @@ export function dayToDocument(item: DayItem): DocumentInput | null {
       // this source's Sender; `display` is what the user sees on the confirm
       // surface. channelName ALREADY carries '#' / 'DM with …' / 'Group DM:'
       // (conversationDisplayName) — never prefix it again.
-      outbound: { ref: { channel: item.channelId }, display: item.channelName },
+      // `targets` (engine ≥0.62): one per message, keyed by the ts each
+      // daySection shows — draft_reply target=<ts> threads the reply under
+      // that message (thread_ts = its own ts starts the thread if none).
+      outbound: {
+        ref: { channel: item.channelId },
+        display: item.channelName,
+        targets: msgs.map((m) => ({
+          key: m.ts,
+          ref: { channel: item.channelId, thread_ts: m.ts },
+          display: `${item.channelName} (thread on ${m.userName} · ${fmt(tsToDate(m.ts))})`,
+        })),
+      },
     },
     createdAt: tsToDate(msgs[0].ts).toISOString(),
   };

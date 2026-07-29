@@ -1105,8 +1105,9 @@ describe('toDocument (pure)', () => {
       markdown: [
         `# #general — ${DAY2}`,
         '---',
-        '**Bob B** · 2024-01-02 00:00\n\nday2 older',
-        '**alice** · 2024-01-02 00:01\n\nday2 with file',
+        // Each section shows its raw ts — the draft_reply `target` key.
+        '**Bob B** · 2024-01-02 00:00 · ts 1704153650.000100\n\nday2 older',
+        '**alice** · 2024-01-02 00:01 · ts 1704153700.000100\n\nday2 with file',
       ].join('\n\n'),
       url: 'https://acme.slack.com/archives/C1/p1704153650000100',
       metadata: {
@@ -1117,9 +1118,25 @@ describe('toDocument (pure)', () => {
         participants: ['Bob B', 'alice'],
         first_message_at: '2024-01-02T00:00:50.000Z',
         last_message_at: '2024-01-02T00:01:40.000Z',
-        // Reply target for the outbound layer: channel-level, no thread_ts.
-        // `display` is channelName VERBATIM — it already carries the '#'.
-        outbound: { ref: { channel: 'C1' }, display: '#general' },
+        // Default reply target: channel-level, no thread_ts. `display` is
+        // channelName VERBATIM — it already carries the '#'. `targets` adds
+        // one thread-ref per message, keyed by the ts the section shows.
+        outbound: {
+          ref: { channel: 'C1' },
+          display: '#general',
+          targets: [
+            {
+              key: '1704153650.000100',
+              ref: { channel: 'C1', thread_ts: '1704153650.000100' },
+              display: '#general (thread on Bob B · 2024-01-02 00:00)',
+            },
+            {
+              key: '1704153700.000100',
+              ref: { channel: 'C1', thread_ts: '1704153700.000100' },
+              display: '#general (thread on alice · 2024-01-02 00:01)',
+            },
+          ],
+        },
       },
       createdAt: '2024-01-02T00:00:50.000Z',
     });
@@ -1141,6 +1158,13 @@ describe('toDocument (pure)', () => {
     expect(doc.metadata.outbound).toEqual({
       ref: { channel: 'D9' },
       display: 'DM with Alice',
+      targets: [
+        {
+          key: '1704153650.000100',
+          ref: { channel: 'D9', thread_ts: '1704153650.000100' },
+          display: 'DM with Alice (thread on alice · 2024-01-02 00:00)',
+        },
+      ],
     });
   });
 
