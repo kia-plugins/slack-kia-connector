@@ -11,7 +11,7 @@ import type {
   SendResult,
   Sender,
   SenderContext,
-} from './kiagent-contracts';
+} from '@kiagent/connector-sdk';
 import {
   SlackApiError,
   SlackClient,

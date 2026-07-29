@@ -26,7 +26,7 @@ import type {
   DocumentInput,
   HostFor,
   Session,
-} from '../kiagent-contracts';
+} from '@kiagent/connector-sdk';
 
 const NOW_MS = Date.parse('2024-01-05T00:00:00.000Z');
 
@@ -242,6 +242,11 @@ describe('connect', () => {
         return answers;
       },
       status: () => {},
+      // Required by the contract; slack connect() is a paste-token flow that
+      // must never open a folder picker — reaching for it is a test failure.
+      pickFolders: async () => {
+        throw new Error('slack connect must not pick folders');
+      },
     };
     return { auth, getSchema: () => schema };
   }
@@ -1304,7 +1309,7 @@ describe('toDocument (pure)', () => {
 
 describe('fetchBytes', () => {
   const doc = (metadata: Record<string, unknown>) =>
-    ({ metadata }) as unknown as import('../kiagent-contracts').Document;
+    ({ metadata }) as unknown as import('@kiagent/connector-sdk').Document;
 
   it('re-downloads via metadata.url_private with the vault token', async () => {
     const { fetchFn, calls } = fakeSlack({

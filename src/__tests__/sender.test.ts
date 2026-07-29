@@ -10,7 +10,7 @@
  */
 import { createSlackSender } from '../sender';
 import type { NetFetch } from '../client';
-import type { HostFor, SendIntent, SenderContext } from '../kiagent-contracts';
+import type { HostFor, SendIntent, SenderContext } from '@kiagent/connector-sdk';
 
 /** Local copies of source.test.ts's helpers — that suite doesn't export them. */
 function jsonResponse(

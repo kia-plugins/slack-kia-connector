@@ -26,7 +26,7 @@ import type {
   PullPhase,
   Session,
   Source,
-} from './kiagent-contracts';
+} from '@kiagent/connector-sdk';
 import {
   SLACK_API_BASE,
   SlackApiError,
@@ -37,7 +37,7 @@ import {
   type SlackEnvelope,
 } from './client';
 import { SlackUserDirectory } from './users';
-import { SourceAuthError } from './kiagent-source-errors';
+import { SourceAuthError } from '@kiagent/connector-sdk';
 import {
   MAX_FILE_BYTES,
   dayKey,
@@ -904,7 +904,7 @@ export function createSlackSource(
       } catch (e) {
         // The platform surfaces lastError verbatim — make dead-token failures
         // actionable for the user. SourceAuthError's `code: 'auth'` (see
-        // ./kiagent-source-errors) is what drives the engine to
+        // @kiagent/connector-sdk) is what drives the engine to
         // `needsReauth` and stops retries — a plain Error here (or one
         // converted anywhere upstream of this single boundary) would just
         // burn the transient-retry budget forever on a dead token.

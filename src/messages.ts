@@ -10,7 +10,7 @@
  * v2 upserts replace whole documents, so every day item carries the complete
  * day (see the delta day-start clamp in source.ts).
  */
-import type { DocumentInput } from './kiagent-contracts';
+import type { DocumentInput } from '@kiagent/connector-sdk';
 import { renderMrkdwn } from './render';
 import type {
   DayItem,
