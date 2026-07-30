@@ -124,7 +124,7 @@ export function dayToDocument(item: DayItem): DocumentInput | null {
       // this source's Sender; `display` is what the user sees on the confirm
       // surface. channelName ALREADY carries '#' / 'DM with …' / 'Group DM:'
       // (conversationDisplayName) — never prefix it again.
-      // `targets` (engine ≥0.62): one per message, keyed by the ts each
+      // `targets`: one per message, keyed by the ts each
       // daySection shows — draft_reply target=<ts> threads the reply under
       // that message (thread_ts = its own ts starts the thread if none).
       outbound: {

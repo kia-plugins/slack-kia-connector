@@ -789,7 +789,7 @@ export function createSlackSource(
   }
 
   function makeCtx(session: Session, client: SlackClient): PullCtx {
-    const key = String(session.account.id ?? session.account.identifier ?? '');
+    const key = String(session.account.id);
     let users = directories.get(key);
     if (!users) {
       users = new SlackUserDirectory();

@@ -42,9 +42,7 @@ export function createSlackSender(host: HostFor<'net' | 'send'>): Sender {
       const ref = (intent.outboundRef ?? {}) as OutboundRef;
       const channel = ref.channel;
       if (!channel)
-        throw new Error(
-          'this Slack draft has no reply target — draft from a fresher document (older docs gain reply targets on their next sync)',
-        );
+        throw new Error('this Slack draft has no reply target');
       const client = new SlackClient({
         fetch: host.net.fetch as NetFetch,
         token,
