@@ -407,6 +407,9 @@ describe('pull — backfill', () => {
     expect(file.bytes).toEqual(F1_BYTES);
     expect(file.parentExternalId).toBe(`C1:${DAY2}`);
     expect(file.parentType).toBe('slack.day');
+    // File items carry the team url too — toDocument turns it into the archive
+    // permalink of the message that carried the file.
+    expect(file.teamUrl).toBe('https://acme.slack.com/');
     expect(batches[1].cursor.backfill_progress).toBeUndefined();
     expect(batches[1].cursor.backfill_done).toEqual(['C1']);
     expect(batches[1].cursor.conversations).toEqual({
@@ -1259,6 +1262,7 @@ describe('toDocument (pure)', () => {
       urlPrivate: 'https://files.slack.com/F1',
       channelId: 'C1',
       ts: '1704153700.000100',
+      teamUrl: 'https://acme.slack.com/',
       parentExternalId: `C1:${DAY2}`,
       parentType: 'slack.day',
     };
@@ -1270,6 +1274,9 @@ describe('toDocument (pure)', () => {
       title: 'notes.pdf',
       markdown: null,
       binary: { bytes: F1_BYTES, mime: 'application/pdf', filename: 'notes.pdf' },
+      // Archive permalink of the CARRYING message (item.ts) — a file doc with
+      // no url is unopenable from search results (the v1 source_url contract).
+      url: 'https://acme.slack.com/archives/C1/p1704153700000100',
       metadata: {
         filename: 'notes.pdf',
         mime_type: 'application/pdf',

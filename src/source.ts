@@ -281,6 +281,7 @@ async function collectFileItems(
         urlPrivate: f.url_private,
         channelId,
         ts: m.ts,
+        teamUrl: ctx.teamUrl,
         parentExternalId,
         parentType,
       };

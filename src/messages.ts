@@ -178,6 +178,10 @@ export function fileToDocument(item: FileItem): DocumentInput {
     // Binary in, markdown out is the ENGINE's job (built-in parsers, then the
     // OCR/VLM deep-extraction pass) — v1's converter/media-cache is gone.
     markdown: null,
+    // Archive permalink of the message that carried the file (v1 set the same
+    // source_url). metadata.url_private stays the download handle — it is
+    // token-gated and useless as a click target.
+    url: archiveUrl(item.teamUrl, item.channelId, item.ts),
     binary: item.bytes
       ? { bytes: item.bytes, mime: item.mime, filename: item.filename }
       : undefined,

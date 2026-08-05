@@ -134,7 +134,9 @@ export interface FileItem {
   bytes?: Uint8Array;
   urlPrivate: string;
   channelId: string;
+  /** ts of the message that carried the file — the doc's archive permalink. */
   ts: string;
+  teamUrl: string;
   /** The day/thread doc this file belongs to — emitted in the SAME batch so
    *  the engine resolves parentage in-transaction. */
   parentExternalId: string;
