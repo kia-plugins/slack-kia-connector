@@ -49,6 +49,12 @@ import {
   toRendered,
   tsToDate,
 } from './messages';
+import {
+  conversationTier,
+  orderConversations,
+  orderThreads,
+  threadActivityTs,
+} from './schedule';
 import type {
   ActiveThread,
   BackfillProgress,
@@ -63,7 +69,17 @@ import type {
 } from './types';
 
 export const ACTIVE_THREAD_WINDOW_DAYS = 14;
-export const DELTA_REQUEST_BUDGET = 40;
+/** Requests one 15-minute delta poll may spend — ~5/min on average, well
+ *  under the ~50/min Tier 3 limit internal apps keep (the client throttles to
+ *  45/min, so a full poll takes ~2 minutes of wall-clock). */
+export const DELTA_REQUEST_BUDGET = 80;
+/** Requests held back from the conversation pass for due threads. */
+export const THREAD_REQUEST_RESERVE = 20;
+/** Share of the conversation budget the active tier may spend, so warm and
+ *  cold conversations are still reached when many conversations are busy. */
+export const ACTIVE_TIER_SHARE = 0.75;
+/** Warn when an active conversation hasn't been read for 2 poll cadences. */
+export const ACTIVE_LAG_WARN_S = 30 * 60;
 export const LIST_REFRESH_EVERY = 10;
 /** Re-read this far behind latest_ts so replies turning a recent message into
  *  a thread root are noticed (replies never appear in channel history). */
@@ -578,14 +594,35 @@ async function* delta(
     }
   }
 
-  // 2) Poll conversations, stalest first — one batch per polled channel, so a
-  //    channel's latest_ts only ever advances WITH that channel's items.
-  const order = Object.entries(cursor.conversations).sort((x, y) =>
-    (x[1].last_polled ?? '').localeCompare(y[1].last_polled ?? ''),
+  // Threads gone quiet past twice the active window are dropped without a
+  // probe (they cost a request each and can no longer earn their place).
+  cursor.active_threads = cursor.active_threads.filter((t) =>
+    withinDays(ctx, threadActivityTs(t), 2 * ACTIVE_THREAD_WINDOW_DAYS),
   );
-  for (const [id, cc] of order) {
+  const dueThreads = orderThreads(cursor.active_threads, ctx.now());
+  const threadReserve = Math.min(dueThreads.length, THREAD_REQUEST_RESERVE);
+  const plan = orderConversations(cursor.conversations, ctx.now());
+  // The cap only matters when warm/cold conversations are waiting for budget.
+  const activeCap = plan.some((p) => p.tier > 0)
+    ? Math.max(1, Math.floor(ACTIVE_TIER_SHARE * (left() - threadReserve)))
+    : Number.POSITIVE_INFINITY;
+  let activeSpent = 0;
+  const polled: [number, number, number] = [0, 0, 0];
+  let conversationsLeft = 0;
+
+  // 2) Poll DUE conversations, active tier first, stalest first within a
+  //    tier (see schedule.ts) — one batch per polled channel, so a channel's
+  //    latest_ts only ever advances WITH that channel's items. The active
+  //    tier may spend only ACTIVE_TIER_SHARE so warm/cold conversations still
+  //    get read, and a slice is held back for the thread pass.
+  for (const { id, conv: cc, tier } of plan) {
     if (ctx.session.signal.aborted) return;
-    if (left() <= 0) break;
+    if (left() <= threadReserve || (tier === 0 && activeSpent >= activeCap)) {
+      conversationsLeft++;
+      continue;
+    }
+    const spentBefore = ctx.client.requestCount;
+    polled[tier]++;
     const conv: ConvRef = { id, name: cc.name, kind: cc.kind };
     try {
       // COMPLETE-DAY INVARIANT (the key v1→v2 change): v2 upserts REPLACE
@@ -627,6 +664,7 @@ async function* delta(
             known.last_reply_ts = t.last_reply_ts;
         }
         cc.last_polled = new Date(ctx.now()).toISOString();
+        if (tier === 0) activeSpent += ctx.client.requestCount - spentBefore;
         yield { phase: 'live', items: result.tailItems, cursor: snapshot(cursor) };
         continue;
       }
@@ -671,6 +709,7 @@ async function* delta(
         );
       }
       cc.last_polled = new Date(ctx.now()).toISOString();
+      if (tier === 0) activeSpent += ctx.client.requestCount - spentBefore;
       yield { phase: 'live', items, cursor: snapshot(cursor) };
     } catch (e) {
       if (isAuthError(e)) throw e;
@@ -688,16 +727,28 @@ async function* delta(
     }
   }
 
-  // 3) Active threads: probe for new replies, re-emit the whole thread doc.
-  const keep: ActiveThread[] = [];
-  for (const t of [...cursor.active_threads]) {
+  // 3) Active threads: probe DUE threads (hottest first) for new replies,
+  //    re-emit the whole thread doc. Threads not due, or past the budget,
+  //    stay untouched for a later poll.
+  // Re-plan: roots discovered by the conversation pass are due right away.
+  const dueNow = orderThreads(cursor.active_threads, ctx.now());
+  const probe = new Set(dueNow);
+  const keep: ActiveThread[] = cursor.active_threads.filter(
+    (t) => !probe.has(t),
+  );
+  let threadsProbed = 0;
+  let threadsLeft = 0;
+  for (const t of dueNow) {
     if (ctx.session.signal.aborted) return;
-    if (left() <= 1) {
+    if (left() <= 0) {
       keep.push(t); // budget spent — keep untouched for the next poll
+      threadsLeft++;
       continue;
     }
     const cc = cursor.conversations[t.channel];
     if (!cc) continue; // channel pruned — thread goes with it
+    threadsProbed++;
+    t.last_probed = new Date(ctx.now()).toISOString();
     try {
       const probe = await ctx.client.call<HistoryPage>(
         'conversations.replies',
@@ -751,8 +802,38 @@ async function* delta(
   }
   cursor.active_threads = keep;
 
-  // Final batch persists the poll counter, thread expiry, and any pruning
-  // even on a tick where nothing else changed.
+  // Freshness: the most overdue ACTIVE conversation after this poll. "Live,
+  // last synced just now" says nothing about whether a busy DM was read —
+  // this does, in the cursor (forensics) and the log.
+  const nowMs = ctx.now();
+  let activeLagMs = 0;
+  let activeCount = 0;
+  for (const cc of Object.values(cursor.conversations)) {
+    if (conversationTier(cc.latest_ts, nowMs) !== 0) continue;
+    activeCount++;
+    const lag = cc.last_polled
+      ? nowMs - Date.parse(cc.last_polled)
+      : Number.POSITIVE_INFINITY;
+    activeLagMs = Math.max(activeLagMs, lag);
+  }
+  const lagS = Number.isFinite(activeLagMs) ? Math.round(activeLagMs / 1000) : -1;
+  cursor.freshness = {
+    at: new Date(nowMs).toISOString(),
+    active_lag_s: lagS,
+    polled,
+    conversations_left: conversationsLeft,
+    threads_probed: threadsProbed,
+    threads_left: threadsLeft,
+    requests: ctx.client.requestCount - start,
+    budget,
+  };
+  const summary = `slack delta: ${activeCount} active conversations, oldest read ${lagS < 0 ? 'never' : `${Math.round(lagS / 60)}m ago`} · polled active ${polled[0]} warm ${polled[1]} cold ${polled[2]} (${conversationsLeft} due left) · threads ${threadsProbed} (${threadsLeft} due left) · ${cursor.freshness.requests}/${budget} requests`;
+  if (lagS < 0 || lagS > ACTIVE_LAG_WARN_S)
+    ctx.session.log('warn', `${summary} — active conversations are falling behind`);
+  else ctx.session.log('info', summary);
+
+  // Final batch persists the poll counter, thread expiry, freshness and any
+  // pruning even on a tick where nothing else changed.
   yield { phase: 'live', items: [], cursor: snapshot(cursor) };
 }
 
@@ -760,7 +841,7 @@ export interface SlackSourceOptions {
   /** Test seams — instant clock so suites never wait out the throttle. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
-  /** Test seam — delta request budget override (default 40). */
+  /** Test seam — delta request budget override (default DELTA_REQUEST_BUDGET). */
   requestBudget?: number;
 }
 

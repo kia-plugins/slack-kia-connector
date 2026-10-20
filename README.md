@@ -71,12 +71,22 @@ flow is load-bearing for backfill.
 - **Backfill:** on first connect, the connector walks the full history of
   every conversation you're a member of, resuming page-aligned if
   interrupted — even mid-channel.
-- **Live sync:** afterwards it polls every **15 minutes** within a small
-  request budget: stalest channels first with a ~24h re-read window (so
-  replies that turn a recent message into a thread root are noticed), plus a
-  pass over threads active in the last 14 days. Channels you leave (or that
-  get archived/deleted) are pruned; newly joined ones are backfilled during
-  the periodic membership refresh.
+- **Live sync:** afterwards it polls every **15 minutes** within a budget
+  of 80 requests (about 5 a minute, well under Slack's limit for internal
+  apps). Conversations are read by how recently they were active:
+  - active in the last 7 days: every poll;
+  - active in the last year: hourly;
+  - older, or never used: every 6 hours.
+
+  A quiet conversation that gets a new message turns active on the next
+  poll. Each read re-covers ~24h so replies that turn a recent message into
+  a thread root are noticed. Threads with replies in the last 14 days are
+  probed the same way: every poll when replied to within a day, hourly
+  within a week, every 6 hours after that. Part of the budget is kept for
+  them. Channels you leave (or that get archived/deleted) are pruned; newly
+  joined ones are backfilled during the periodic membership refresh.
+- **Freshness:** every poll logs how long ago the least recently read active
+  conversation was read, and warns when that exceeds 30 minutes.
 
 ## Privacy
 

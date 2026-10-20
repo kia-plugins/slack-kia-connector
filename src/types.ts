@@ -56,6 +56,8 @@ export interface ActiveThread {
   thread_ts: string;
   /** '0' = newly discovered root; the replies poll fetches the whole thread. */
   last_reply_ts: string;
+  /** ISO timestamp of the last replies probe — drives the thread schedule. */
+  last_probed?: string;
 }
 
 /** Page-aligned resume point inside one conversation's backfill walk. A giant
@@ -86,6 +88,25 @@ export interface SlackCursor {
   backfill_progress?: BackfillProgress;
   /** Delta poll counter (drives the every-Nth conversations.list refresh). */
   polls?: number;
+  /** Written by every delta poll for forensics: how stale the most overdue
+   *  active conversation is after the poll, and what the poll spent. */
+  freshness?: SlackFreshness;
+}
+
+export interface SlackFreshness {
+  /** ISO time of the poll that wrote this. */
+  at: string;
+  /** Seconds since the least recently polled ACTIVE conversation was read. */
+  active_lag_s: number;
+  /** Conversations read this poll, per tier (active, warm, cold). */
+  polled: [number, number, number];
+  /** Due conversations the budget could not reach. */
+  conversations_left: number;
+  threads_probed: number;
+  /** Due threads the budget could not reach. */
+  threads_left: number;
+  requests: number;
+  budget: number;
 }
 
 // ── Items (pull output; toDocument input — everything pre-resolved) ─────────

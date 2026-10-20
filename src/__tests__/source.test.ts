@@ -11,6 +11,7 @@
  * stamps are deterministic; TZ=UTC (jest.config.js) pins local-day math.
  */
 import { createSlackSource } from '../source';
+import { conversationTier } from '../schedule';
 import type { NetFetch } from '../client';
 import type {
   ActiveThread,
@@ -733,11 +734,11 @@ describe('pull — delta', () => {
       methods: {
         'users.list': [usersPage()],
         'conversations.history': [
-          // C1 backlog, two pages newest→oldest
+          // C2 (active tier) fast-path poll comes first
+          ok({ messages: [] }),
+          // C1 (warm tier) backlog, two pages newest→oldest
           ok({ messages: [mP1a, mP1b], response_metadata: { next_cursor: 'w2' } }),
           ok({ messages: [mP2a, mP2b] }),
-          // C2 fast-path poll
-          ok({ messages: [] }),
         ],
       },
     };
@@ -761,16 +762,18 @@ describe('pull — delta', () => {
     const batches = await drain(source.pull(session, cursor));
 
     const history = calls.filter((c) => c.method === 'conversations.history');
-    // C1's walk is bounded below by the SAME day-start clamp and pages
-    // through the backlog; C2 stays on the single-call fast path.
+    // Active C2 is polled before warm C1 and stays on the single-call fast
+    // path; C1's walk is bounded below by the SAME day-start clamp and pages
+    // through the backlog.
     expect(history.map((c) => [c.params.channel, c.params.oldest, c.params.cursor])).toEqual([
+      ['C2', '1704240000', undefined],
       ['C1', '1700870400', undefined],
       ['C1', '1700870400', 'w2'],
-      ['C2', '1704240000', undefined],
     ]);
 
-    // [C1 page batch, C1 completion, C2 poll, final] — never one giant batch.
+    // [C2 poll, C1 page batch, C1 completion, final] — never one giant batch.
     expect(batches).toHaveLength(4);
+    batches.shift(); // C2's empty poll
     expect(itemKinds(batches[0])).toEqual(['day']); // jan 3, flushed on page 1
     // page batches ride an UNCHANGED cursor: a crash re-detects the deep
     // window (old latest_ts) and re-walks idempotently.
@@ -947,12 +950,12 @@ describe('pull — delta', () => {
         'users.list': [usersPage()],
         'conversations.history': [ok({ messages: [rootMsg] })], // C1 poll
         'conversations.replies': [
-          // probe of the stale thread (first in the cursor) — nothing fresh
-          ok({ messages: [] }),
-          // probe of the NEW root (oldest '0') sees everything as fresh
+          // probe of the NEW root (oldest '0', hottest tier) sees everything
           ok({ messages: [rootMsg, newReply] }),
           // full-thread re-fetch
           ok({ messages: [rootMsg, newReply] }),
+          // probe of the stale thread — nothing fresh
+          ok({ messages: [] }),
         ],
       },
     };
@@ -981,12 +984,13 @@ describe('pull — delta', () => {
     expect(batches[0].items).toEqual([]);
     expect(batches[0].cursor.active_threads).toContainEqual(newThread);
 
-    // probes: stale thread from its own ts, then the new root from '0'.
+    // probes: the hot new root first (from '0', then its full re-fetch),
+    // then the stale thread from its own ts.
     const replies = calls.filter((c) => c.method === 'conversations.replies');
     expect(replies.map((c) => c.params.oldest)).toEqual([
-      oldThreadTs,
       '0',
       undefined, // the full-thread re-fetch has no oldest
+      oldThreadTs,
     ]);
 
     // the thread's batch carries the re-rendered doc AND the advanced cursor.
@@ -998,12 +1002,13 @@ describe('pull — delta', () => {
     expect(threadBatch.cursor.active_threads).toContainEqual({
       ...newThread,
       last_reply_ts: newReply.ts,
+      last_probed: new Date(NOW_MS).toISOString(),
     });
 
     // final cursor: fresh thread kept, expired one dropped.
     const last = batches.at(-1)!;
     expect(last.cursor.active_threads).toEqual([
-      { ...newThread, last_reply_ts: newReply.ts },
+      { ...newThread, last_reply_ts: newReply.ts, last_probed: new Date(NOW_MS).toISOString() },
     ]);
   });
 
@@ -1036,15 +1041,16 @@ describe('pull — delta', () => {
     expect(Object.keys(last.cursor.conversations)).toEqual(['C1']);
   });
 
-  it('stops polling channels when the request budget is spent, keeping unprobed threads untouched', async () => {
+  it('holds a slice of the budget back for due threads: conversations stop early, the thread is still probed', async () => {
     const script: SlackScript = {
       methods: {
         'users.list': [usersPage()],
         'conversations.history': [ok({ messages: [] })], // only C2 fits
+        'conversations.replies': [ok({ messages: [] })], // the reserved probe
       },
     };
     const { fetchFn, calls } = fakeSlack(script);
-    const source = makeSource(fetchFn, 2); // users.list + one history call
+    const source = makeSource(fetchFn, 3); // users.list + C2 + one reserved probe
     const session = makeSession(CREDS);
 
     const thread: ActiveThread = {
@@ -1056,11 +1062,154 @@ describe('pull — delta', () => {
 
     const history = calls.filter((c) => c.method === 'conversations.history');
     expect(history.map((c) => c.params.channel)).toEqual(['C2']);
-    expect(calls.filter((c) => c.method === 'conversations.replies')).toHaveLength(0);
-    // the unpolled channel keeps its OLD stamp and the unprobed thread survives
+    expect(calls.filter((c) => c.method === 'conversations.replies')).toHaveLength(1);
+    // the unpolled channel keeps its OLD stamp; the probed thread is stamped
     const last = batches.at(-1)!;
     expect(last.cursor.conversations.C1.last_polled).toBe('2024-01-04T00:00:00.000Z');
+    expect(last.cursor.active_threads).toEqual([
+      { ...thread, last_probed: new Date(NOW_MS).toISOString() },
+    ]);
+    expect(last.cursor.freshness).toMatchObject({
+      polled: [1, 0, 0],
+      conversations_left: 1,
+      threads_probed: 1,
+      threads_left: 0,
+      requests: 3,
+      budget: 3,
+    });
+  });
+
+  it('keeps unprobed threads untouched when the budget is already spent', async () => {
+    const script: SlackScript = { methods: { 'users.list': [usersPage()] } };
+    const { fetchFn, calls } = fakeSlack(script);
+    const source = makeSource(fetchFn, 1); // users.list only
+    const session = makeSession(CREDS);
+
+    const thread: ActiveThread = {
+      channel: 'C1',
+      thread_ts: ROOT_TS,
+      last_reply_ts: '1704240550.000200',
+    };
+    const batches = await drain(source.pull(session, liveCursor({ active_threads: [thread] })));
+
+    expect(calls.map((c) => c.method)).toEqual(['users.list']);
+    const last = batches.at(-1)!;
     expect(last.cursor.active_threads).toEqual([thread]);
+    expect(last.cursor.freshness).toMatchObject({ conversations_left: 2, threads_left: 1 });
+  });
+
+  it('schedules by activity: a warm conversation read within the hour is skipped, a cold one is read once due, and a cold one that wakes up turns active', async () => {
+    const recent: SlackMessage = { ts: '1704412000.000100', user: 'U1', text: 'woke up' }; // jan 4 23:46
+    const script: SlackScript = {
+      methods: {
+        'users.list': [usersPage()],
+        'conversations.history': [
+          ok({ messages: [] }), // ACT (active)
+          ok({ messages: [recent] }), // COLD — due after 6h, has news
+        ],
+      },
+    };
+    const { fetchFn, calls } = fakeSlack(script);
+    const source = makeSource(fetchFn);
+    const warnings: string[] = [];
+    const session = makeSession(CREDS, warnings);
+
+    const cursor: SlackCursor = {
+      conversations: {
+        COLD: { latest_ts: '1600000000.000100', name: 'Group DM: a, b', kind: 'mpim', last_polled: '2024-01-04T12:00:00.000Z' },
+        COLD2: { latest_ts: '0', name: 'Group DM: c, d', kind: 'mpim', last_polled: '2024-01-04T22:00:00.000Z' },
+        WARM: { latest_ts: '1703000000.000100', name: '#warm', kind: 'public_channel', last_polled: '2024-01-04T23:40:00.000Z' },
+        ACT: { latest_ts: '1704326400.000100', name: 'DM with Ann', kind: 'im', last_polled: '2024-01-04T23:45:00.000Z' },
+      },
+      active_threads: [],
+      polls: 3,
+    };
+    const batches = await drain(source.pull(session, cursor));
+
+    // active first; warm (20 min ago) and COLD2 (2h ago) not due; COLD due.
+    const history = calls.filter((c) => c.method === 'conversations.history');
+    expect(history.map((c) => c.params.channel)).toEqual(['ACT', 'COLD']);
+    const last = batches.at(-1)!;
+    expect(last.cursor.conversations.WARM.last_polled).toBe('2024-01-04T23:40:00.000Z');
+    expect(last.cursor.conversations.COLD2.last_polled).toBe('2024-01-04T22:00:00.000Z');
+    // COLD's news moved its latest_ts → it is active from the next poll on
+    expect(last.cursor.conversations.COLD.latest_ts).toBe(recent.ts);
+    expect(conversationTier(last.cursor.conversations.COLD.latest_ts, NOW_MS)).toBe(0);
+    expect(last.cursor.freshness).toMatchObject({ polled: [1, 0, 1], active_lag_s: 0 });
+    expect(warnings).toEqual([]);
+  });
+
+  it('caps the active tier at its share of the budget when warm/cold conversations are due', async () => {
+    const actives: Record<string, SlackCursor['conversations'][string]> = {};
+    for (let i = 0; i < 6; i++)
+      actives[`A${i}`] = { latest_ts: '1704326400.000100', name: `DM ${i}`, kind: 'im', last_polled: `2024-01-04T23:4${i}:00.000Z` };
+    const script: SlackScript = {
+      methods: {
+        'users.list': [usersPage()],
+        'conversations.history': Array.from({ length: 8 }, () => ok({ messages: [] })),
+      },
+    };
+    const { fetchFn, calls } = fakeSlack(script);
+    // users.list + 5 for conversations: cap = floor(0.75 * 5) = 3 active
+    const source = makeSource(fetchFn, 6);
+    const warnings: string[] = [];
+    const session = makeSession(CREDS, warnings);
+    const cursor: SlackCursor = {
+      conversations: {
+        ...actives,
+        WARM: { latest_ts: '1703000000.000100', name: '#warm', kind: 'public_channel', last_polled: '2024-01-04T20:00:00.000Z' },
+      },
+      active_threads: [],
+      polls: 3,
+    };
+    const batches = await drain(source.pull(session, cursor));
+
+    const history = calls.filter((c) => c.method === 'conversations.history');
+    expect(history.map((c) => c.params.channel)).toEqual(['A0', 'A1', 'A2', 'WARM']);
+    expect(batches.at(-1)!.cursor.freshness).toMatchObject({
+      polled: [3, 1, 0],
+      conversations_left: 3,
+    });
+    // A3 was last read 17 minutes ago — still within 2 cadences, no warning
+    expect(warnings).toEqual([]);
+  });
+
+  it('warns when an active conversation has gone unread for more than two cadences', async () => {
+    const script: SlackScript = { methods: { 'users.list': [usersPage()] } };
+    const { fetchFn } = fakeSlack(script);
+    const source = makeSource(fetchFn, 1); // nothing left after users.list
+    const warnings: string[] = [];
+    const session = makeSession(CREDS, warnings);
+    const batches = await drain(
+      source.pull(
+        session,
+        liveCursor({
+          conversations: {
+            D1: { latest_ts: '1704326400.000100', name: 'DM with Richard', kind: 'im', last_polled: '2024-01-04T22:00:00.000Z' },
+          },
+        }),
+      ),
+    );
+    expect(batches.at(-1)!.cursor.freshness?.active_lag_s).toBe(2 * 3600);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/oldest read 120m ago.*falling behind/);
+  });
+
+  it('drops threads quiet for more than twice the active window without probing them', async () => {
+    const script: SlackScript = {
+      methods: {
+        'users.list': [usersPage()],
+        'conversations.history': [ok({ messages: [] }), ok({ messages: [] })],
+      },
+    };
+    const { fetchFn, calls } = fakeSlack(script);
+    const source = makeSource(fetchFn);
+    const session = makeSession(CREDS);
+    const dead: ActiveThread = { channel: 'C1', thread_ts: '1700000000.000100', last_reply_ts: '1701000000.000100' }; // 2023-11-26
+    const batches = await drain(source.pull(session, liveCursor({ active_threads: [dead] })));
+
+    expect(calls.filter((c) => c.method === 'conversations.replies')).toHaveLength(0);
+    expect(batches.at(-1)!.cursor.active_threads).toEqual([]);
   });
 
   it('propagates auth errors from delta with the reconnect suffix, tagged code: auth', async () => {
