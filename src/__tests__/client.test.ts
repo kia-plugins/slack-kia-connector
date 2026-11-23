@@ -5,7 +5,13 @@
  * `sleep` is invoked, so throttle/backoff math is exact and the suite runs
  * instantly.
  */
-import { SlackApiError, SlackClient, isAuthError, type NetFetch } from '../client';
+import {
+  SlackApiError,
+  SlackClient,
+  isAuthError,
+  isSlackFileUrl,
+  type NetFetch,
+} from '../client';
 
 function jsonResponse(
   status: number,
@@ -330,6 +336,16 @@ describe('SlackClient.download', () => {
     await expect(client.download('https://files.slack.com/F1')).rejects.toThrow(
       'slack file download: HTTP 404',
     );
+  });
+
+  it('takes every address Slack serves private files from', () => {
+    for (const url of [
+      'https://files.slack.com/files-pri/T1-F1/a.png',
+      'https://slack.com/files-pri/T1-F1/a.png',
+      'https://acme.slack.com/files-pri/T1-F1/a.png',
+      'https://slack-files.com/T1-F1-abc',
+    ])
+      expect(isSlackFileUrl(url)).toBe(true);
   });
 
   it('never sends the token to an address outside Slack', async () => {

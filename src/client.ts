@@ -237,7 +237,7 @@ export function isSlackFileUrl(url: string): boolean {
     const u = new URL(url);
     return (
       u.protocol === 'https:' &&
-      (u.hostname === 'files.slack.com' ||
+      (u.hostname === 'slack.com' ||
         u.hostname.endsWith('.slack.com') ||
         u.hostname === 'slack-files.com' ||
         u.hostname.endsWith('.slack-files.com'))
