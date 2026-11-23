@@ -32,6 +32,7 @@ import {
   SlackApiError,
   SlackClient,
   isAuthError,
+  isSlackFileUrl,
   type HostResponse,
   type NetFetch,
   type SlackEnvelope,
@@ -301,7 +302,9 @@ async function collectFileItems(
         parentExternalId,
         parentType,
       };
-      if (base.sizeBytes > MAX_FILE_BYTES) {
+      // Too large, or stored by another service (a Drive file, a gist): the
+      // file is listed by name and nothing is downloaded.
+      if (base.sizeBytes > MAX_FILE_BYTES || !isSlackFileUrl(f.url_private)) {
         ctx.seenFiles.add(f.id);
         out.push(base);
         continue;
@@ -1018,7 +1021,7 @@ export function createSlackSource(
 
     async fetchBytes(session: Session, doc: Document) {
       const url = doc.metadata['url_private'];
-      if (typeof url !== 'string' || !url) return null;
+      if (typeof url !== 'string' || !isSlackFileUrl(url)) return null;
       const size = doc.metadata['size_bytes'];
       if (typeof size === 'number' && size > MAX_FILE_BYTES) return null;
       try {

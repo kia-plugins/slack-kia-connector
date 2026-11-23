@@ -331,4 +331,36 @@ describe('SlackClient.download', () => {
       'slack file download: HTTP 404',
     );
   });
+
+  it('never sends the token to an address outside Slack', async () => {
+    const fetchFn = jest.fn(async () => jsonResponse(200, {}));
+    const { client } = makeClient(fetchFn);
+
+    for (const url of [
+      'https://drive.google.com/file/d/1abc/view',
+      'https://gist.github.com/u/4b37dc',
+      'https://files.slack.com.evil.example/F1',
+      'http://files.slack.com/F1',
+      'not a url',
+    ])
+      // eslint-disable-next-line no-await-in-loop
+      await expect(client.download(url)).rejects.toThrow(
+        'slack file download: not a Slack file address',
+      );
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('refuses the sign-in page Slack serves in place of a file', async () => {
+    const fetchFn = jest.fn(async () => ({
+      status: 200,
+      statusText: '',
+      headers: {},
+      body: new TextEncoder().encode('<!DOCTYPE html><html dir="ltr">…'),
+    }));
+    const { client } = makeClient(fetchFn);
+
+    await expect(
+      client.download('https://files.slack.com/files-pri/T1-F1/logo.png'),
+    ).rejects.toThrow('slack file download: got a web page, not the file');
+  });
 });

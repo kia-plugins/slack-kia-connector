@@ -206,17 +206,48 @@ export class SlackClient {
 
   /** Download a url_private file with bearer auth.
    *
+   *  Only from Slack's own file hosts: a file shared from Google Drive, a gist
+   *  or another outside service carries that service's address in
+   *  `url_private`, and the Slack token must never be sent there.
+   *
    *  Deliberately NOT on the retry ladder: it has never retried anything, and
    *  routing it through `requestWithRetry` would both add 5xx/429 retries it
    *  never had and rewrite its 429 message (`… HTTP 429 after 1 attempts`
    *  instead of `… HTTP 429`). One attempt, one status check — unchanged. */
   async download(url: string): Promise<Uint8Array> {
+    if (!isSlackFileUrl(url))
+      throw new Error('slack file download: not a Slack file address');
     await this.acquire('files.download');
     const res = (await this.fetchFn(url, {
       headers: { authorization: `Bearer ${this.deps.token}` },
     })) as HostResponse;
     if (res.status < 200 || res.status >= 300)
       throw new Error(`slack file download: HTTP ${res.status}`);
+    // Slack answers a file it will not serve to this token with its sign-in
+    // page and HTTP 200. That page is not the file.
+    if (isHtmlPage(res.body) && !/\.html?(\?|$)/i.test(url))
+      throw new Error('slack file download: got a web page, not the file');
     return res.body;
   }
+}
+
+/** A file Slack itself stores (as opposed to one linked from another service). */
+export function isSlackFileUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.protocol === 'https:' &&
+      (u.hostname === 'files.slack.com' ||
+        u.hostname.endsWith('.slack.com') ||
+        u.hostname === 'slack-files.com' ||
+        u.hostname.endsWith('.slack-files.com'))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isHtmlPage(body: Uint8Array): boolean {
+  const head = Buffer.from(body.subarray(0, 64)).toString('latin1').trimStart();
+  return /^<!doctype html|^<html/i.test(head);
 }

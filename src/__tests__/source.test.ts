@@ -1483,6 +1483,19 @@ describe('fetchBytes', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('asks nothing of a file another service stores', async () => {
+    const { fetchFn, calls } = fakeSlack({ downloads: {} });
+    const source = makeSource(fetchFn);
+
+    const bytes = await source.fetchBytes!(
+      makeSession(CREDS),
+      doc({ url_private: 'https://drive.google.com/file/d/1abc/view' }),
+    );
+
+    expect(bytes).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
   it('returns null for oversize files, missing urls, and failed downloads', async () => {
     const { fetchFn } = fakeSlack({ downloads: {} });
     const source = makeSource(fetchFn);
